@@ -1,4 +1,4 @@
-// Мост между левой панелью и основным процессом
+// Мост между оболочкой и основным процессом
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('vkp', {
@@ -6,8 +6,12 @@ contextBridge.exposeInMainWorld('vkp', {
   navigate: (section) => ipcRenderer.send('navigate', section),
   search: (query) => ipcRenderer.send('search', query),
   login: () => ipcRenderer.send('login'),
+  logout: () => ipcRenderer.send('logout'),
   history: (direction) => ipcRenderer.send('history', direction),
-  media: (action) => ipcRenderer.send('media', action),
+  media: (action, value) => ipcRenderer.send('media', action, value),
+  window: (action) => ipcRenderer.send('window', action),
+  onWindowState: (fn) => ipcRenderer.on('window-state', (_e, state) => fn(state)),
+  stageBounds: (rect) => ipcRenderer.send('stage-bounds', rect),
   ready: () => ipcRenderer.send('shell-ready'),
   onNavState: (fn) => ipcRenderer.on('nav-state', (_e, state) => fn(state)),
   onNowPlaying: (fn) => ipcRenderer.on('now-playing', (_e, info) => fn(info)),

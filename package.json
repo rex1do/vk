@@ -1,8 +1,8 @@
 {
   "name": "vk-player",
   "productName": "VK Player",
-  "version": "2.1.0",
-  "description": "Десктопный плеер для официальной ВК Музыки: своя панель, «Сейчас играет», трей, медиаклавиши",
+  "version": "3.0.0",
+  "description": "Десктопный плеер для официальной ВК Музыки в стиле liquid glass",
   "main": "main.js",
   "license": "MIT",
   "scripts": {
