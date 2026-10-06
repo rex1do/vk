@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QObject,
     QRunnable,
     QSettings,
+    QSize,
     QStandardPaths,
     Qt,
     QThreadPool,
@@ -22,7 +23,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -80,6 +81,44 @@ def save_session(session: Optional[dict]) -> None:
 def fmt_time(seconds: int) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def media_icon(kind: str, color: str = "#e1e3e6", size: int = 48) -> QIcon:
+    """Рисуем иконки сами: системные почти не видны на тёмной теме."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    s = size / 48
+
+    def triangle(x1, x2, y1=12, y2=36):
+        path = QPainterPath()
+        path.moveTo(x1 * s, y1 * s)
+        path.lineTo(x2 * s, (y1 + y2) / 2 * s)
+        path.lineTo(x1 * s, y2 * s)
+        path.closeSubpath()
+        painter.drawPath(path)
+
+    if kind == "play":
+        triangle(17, 37)
+    elif kind == "pause":
+        painter.drawRoundedRect(int(14 * s), int(12 * s), int(7 * s), int(24 * s), 2 * s, 2 * s)
+        painter.drawRoundedRect(int(27 * s), int(12 * s), int(7 * s), int(24 * s), 2 * s, 2 * s)
+    elif kind == "next":
+        triangle(12, 32)
+        painter.drawRoundedRect(int(32 * s), int(12 * s), int(5 * s), int(24 * s), 2 * s, 2 * s)
+    elif kind == "prev":
+        path = QPainterPath()
+        path.moveTo(36 * s, 12 * s)
+        path.lineTo(16 * s, 24 * s)
+        path.lineTo(36 * s, 36 * s)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawRoundedRect(int(11 * s), int(12 * s), int(5 * s), int(24 * s), 2 * s, 2 * s)
+    painter.end()
+    return QIcon(pixmap)
 
 
 # --- Фоновые задачи ---------------------------------------------------------------------------
@@ -276,12 +315,13 @@ class PlayerWindow(QMainWindow):
         splitter.setSizes([230, 770])
 
         # Нижняя панель управления
-        def button(icon, tip, slot, checkable=False, text=None):
+        def button(std, tip, slot, checkable=False, text=None, icon=None):
             b = QToolButton()
             if text:
                 b.setText(text)
             else:
-                b.setIcon(style.standardIcon(icon))
+                b.setIcon(icon or style.standardIcon(std))
+                b.setIconSize(QSize(22, 22))
             b.setToolTip(tip)
             b.setCheckable(checkable)
             b.setAutoRaise(True)
@@ -289,9 +329,11 @@ class PlayerWindow(QMainWindow):
             b.clicked.connect(slot)
             return b
 
-        self.prev_btn = button(QStyle.StandardPixmap.SP_MediaSkipBackward, "Предыдущий", self.prev_track)
-        self.play_btn = button(QStyle.StandardPixmap.SP_MediaPlay, "Играть / пауза (пробел)", self.toggle_play)
-        self.next_btn = button(QStyle.StandardPixmap.SP_MediaSkipForward, "Следующий", self.next_track)
+        self.prev_btn = button(None, "Предыдущий", self.prev_track, icon=media_icon("prev"))
+        self.play_btn = button(None, "Играть / пауза (пробел)", self.toggle_play, icon=media_icon("play", "#ffffff"))
+        self.play_btn.setObjectName("play")
+        self.play_btn.setFixedSize(44, 44)
+        self.next_btn = button(None, "Следующий", self.next_track, icon=media_icon("next"))
         self.shuffle_btn = button(None, "Перемешать", self.save_settings, checkable=True, text="🔀")
         self.repeat_btn = button(None, "", self.cycle_repeat, text="🔁")
 
@@ -657,8 +699,8 @@ class PlayerWindow(QMainWindow):
     def on_state(self, state) -> None:
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.failures = 0
-        icon = QStyle.StandardPixmap.SP_MediaPause if state == QMediaPlayer.PlaybackState.PlayingState else QStyle.StandardPixmap.SP_MediaPlay
-        self.play_btn.setIcon(self.style().standardIcon(icon))
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.play_btn.setIcon(media_icon("pause" if playing else "play", "#ffffff"))
 
     def on_player_error(self, error, message: str) -> None:
         if error == QMediaPlayer.Error.NoError:
@@ -711,6 +753,8 @@ QHeaderView::section { background: #19191b; color: #939393; border: none; paddin
 QToolButton { border-radius: 18px; font-size: 16px; }
 QToolButton:hover { background: #2a2a2c; }
 QToolButton:checked { background: #2b3a4f; }
+QToolButton#play { background: #447bba; border-radius: 22px; }
+QToolButton#play:hover { background: #5181b8; }
 QSlider::groove:horizontal { height: 4px; background: #363738; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: #71aaeb; border-radius: 2px; }
 QSlider::handle:horizontal { background: #fff; width: 12px; margin: -4px 0; border-radius: 6px; }
