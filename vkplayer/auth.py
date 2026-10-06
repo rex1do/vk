@@ -140,7 +140,7 @@ class LoginDialog(QDialog):
         self.setMinimumWidth(420)
         self.session: Optional[dict] = None
 
-        tabs = QTabWidget(self)
+        tabs = self.tabs = QTabWidget(self)
         tabs.addTab(self._tab_browser(), "Через окно ВК")
         tabs.addTab(self._tab_password(), "Логин и пароль")
         tabs.addTab(self._tab_token(), "Токен")
@@ -263,6 +263,12 @@ class LoginDialog(QDialog):
                 if code is None:
                     return
                 extra["code"] = code
+            elif error == "9;Flood control" or data.get("error_type") == "password_bruteforce_attempt":
+                self._suggest_oauth(
+                    "ВК не разрешает этому аккаунту вход по паролю через сторонние программы "
+                    "(защита от подбора пароля). Аккаунт при этом не заблокирован."
+                )
+                return
             elif error == "invalid_client":
                 QMessageBox.warning(self, "Вход", "Неверный логин или пароль.")
                 return
@@ -272,6 +278,19 @@ class LoginDialog(QDialog):
         QMessageBox.warning(self, "Вход", "Слишком много попыток.")
 
     # --- помощники ---
+
+    def _suggest_oauth(self, reason: str) -> None:
+        if not HAS_WEBENGINE:
+            QMessageBox.warning(self, "Вход", reason + "\n\nПопробуйте вход по токену или повторите через несколько часов.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Вход",
+            reason + "\n\nВойти через официальное окно ВКонтакте (прямо в программе)?",
+        )
+        self.tabs.setCurrentIndex(0)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.login_oauth()
 
     def _busy(self, fn, *args, **kwargs):
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
