@@ -130,6 +130,9 @@
       </div>
 
       <div class="right">
+        <button class="icon-btn add-btn" data-act="add" title="Добавить в Мои аудио"><svg viewBox="0 0 24 24" class="ic-add"><path d="M12 5v14M5 12h14"/></svg><svg viewBox="0 0 24 24" class="ic-added"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+        <button class="icon-btn" data-act="download" title="Скачать трек"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/></svg></button>
+        <button class="icon-btn" id="eq-btn" title="Эквалайзер"><svg viewBox="0 0 24 24"><path d="M6 4v16M12 4v16M18 4v16"/><circle cx="6" cy="14" r="2.2" class="fill"/><circle cx="12" cy="8" r="2.2" class="fill"/><circle cx="18" cy="15" r="2.2" class="fill"/></svg></button>
         <div class="volume">
           <button class="icon-btn mute" title="Без звука">
             <svg viewBox="0 0 24 24" class="vol-on"><path class="fill" d="M3.5 9h4l5-4.5v15l-5-4.5h-4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/></svg>
@@ -152,11 +155,16 @@
       <div class="fs-bg-layer l2"></div>
       <div class="fs-bg-layer l3"></div>
       <div class="fs-bg-shade"></div>
+      <div class="fs-pulse"></div>
     </div>
     <div class="fs-top drag">
       <div class="fs-grabber" id="fs-grabber" title="Потяните вниз, чтобы свернуть"></div>
       <button class="icon-btn fs-close" id="fs-close" title="Свернуть (Esc)">
         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <button class="icon-btn fs-immersive" id="fs-immersive" title="Только плеер, на весь экран (F11)">
+        <svg viewBox="0 0 24 24" class="ic-enter"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg>
+        <svg viewBox="0 0 24 24" class="ic-exit"><path d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4"/></svg>
       </button>
       <div class="fs-tabs" role="tablist" id="fs-tabs">
         <span class="fs-tab-ind" id="fs-tab-ind"></span>
@@ -178,8 +186,17 @@
       <div class="fs-main">
         <div class="fs-cover" id="fs-cover"><img alt=""></div>
         <div class="fs-info">
-          <div class="fs-title" id="fs-title"></div>
-          <div class="fs-artist" id="fs-artist"></div>
+          <div class="fs-title-row">
+            <div class="fs-titles">
+              <div class="fs-title" id="fs-title"></div>
+              <div class="fs-artist" id="fs-artist"></div>
+            </div>
+            <div class="fs-actions">
+              <span class="uncensored-badge" id="uncensored-badge" hidden title="Играет версия без цензуры">18+</span>
+              <button class="icon-btn add-btn" data-act="add" title="Добавить в Мои аудио"><svg viewBox="0 0 24 24" class="ic-add"><path d="M12 5v14M5 12h14"/></svg><svg viewBox="0 0 24 24" class="ic-added"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+              <button class="icon-btn" data-act="download" title="Скачать трек"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/></svg></button>
+            </div>
+          </div>
         </div>
         <div class="progress fs-progress">
           <span class="time" data-bind="pos">0:00</span>
@@ -233,6 +250,19 @@
         </button>
       </div>
       <div class="login-slot" id="login-slot"></div>
+    </div>
+  </div>
+
+  <!-- Эквалайзер -->
+  <div class="eq-panel" id="eq-panel" hidden>
+    <div class="eq-head">
+      <div class="eq-title">Эквалайзер</div>
+      <label class="switch" title="Включить эквалайзер"><input type="checkbox" id="eq-on"><span></span></label>
+    </div>
+    <div class="eq-presets" id="eq-presets"></div>
+    <div class="eq-bands" id="eq-bands"></div>
+    <div class="eq-foot">
+      <label class="switch-row"><span>Подменять зацензуренные треки оригиналом</span><span class="switch"><input type="checkbox" id="uncensor-on"><span></span></span></label>
     </div>
   </div>
 

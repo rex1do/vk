@@ -50,15 +50,17 @@ const plural = (n, one, few, many) => {
 const tracksWord = (n) => `${n} ${plural(n, 'трек', 'трека', 'треков')}`;
 
 let toastTimer = null;
-function toast(text) {
+function toast(text, { onClick = null, duration = 2600 } = {}) {
   const t = $('#toast');
   t.textContent = text;
+  t.onclick = onClick;
+  t.style.cursor = onClick ? 'pointer' : '';
   t.hidden = false;
   t.style.animation = 'none';
   void t.offsetWidth;
   t.style.animation = '';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+  toastTimer = setTimeout(() => { t.hidden = true; }, duration);
 }
 
 // --- API ВКонтакте -------------------------------------------------------------------------
@@ -103,6 +105,11 @@ function pickPhoto(obj, size) {
 function normTrack(a) {
   const thumb = (a.album && a.album.thumb) || a.thumb || null;
   return {
+    id: a.id,
+    owner_id: a.owner_id,
+    access_key: a.access_key || '',
+    isLicensed: Boolean(a.is_licensed) || a.owner_id < 0,
+    album: (a.album && a.album.title) || '',
     key: `${a.owner_id}_${a.id}`,
     fullId: `${a.owner_id}_${a.id}${a.access_key ? '_' + a.access_key : ''}`,
     title: a.title || '',
@@ -304,6 +311,7 @@ bridge.onAuthChanged(async ({ loggedIn }) => {
   auth.loggedIn = loggedIn;
   if (changed) { apiCache.clear(); suggestCache.clear(); router.dropCache(); }
   await refreshMe();
+  library.load();
   if (changed) router.reload();
 });
 
@@ -441,7 +449,7 @@ function renderBlocks(blocks, { limit = 99 } = {}) {
     if (block.kind === 'tracks') {
       const list = block.layout === 'list' || block.layout === 'music_chart_list'
         ? trackList(block.tracks)
-        : trackGrid(block.tracks.slice(0, 9));
+        : trackGrid(block.tracks.slice(0, 12));
       frag.append(el('section', { class: 'section' }, sectionHead(block.title, block.action), list));
     } else if (block.kind === 'playlists') {
       frag.append(el('section', { class: 'section' }, sectionHead(block.title, block.action),
@@ -580,7 +588,7 @@ async function viewMy() {
   const uid = auth.me && auth.me.id;
   let tracks = [];
   try {
-    const resp = await vk('audio.get', { owner_id: uid, count: 2000 });
+    const resp = await vk('audio.get', { owner_id: uid, count: 6000 });
     tracks = (resp.items || []).map(normTrack);
   } catch {
     const data = parseCatalog(await vk('catalog.getAudio', { url: `https://vk.ru/audios${uid}`, need_blocks: 1 }));
@@ -863,6 +871,7 @@ bridge.onFocusSearch(() => { searchInput.focus(); searchInput.select(); });
 
 const audio = new Audio();
 audio.preload = 'auto';
+audio.crossOrigin = 'anonymous'; // нужно эквалайзеру (CDN ВК разрешает такие запросы)
 
 const player = {
   queue: [],
@@ -972,11 +981,24 @@ const player = {
       }
     }
     if (id !== this.loadId) return;
-    if (!track.url) {
+    // режим «без цензуры»: ищем оригинальную версию (не дольше 2,5 с, иначе играем как есть)
+    track.substitute = null;
+    let playUrl = track.url;
+    if (uncensor.enabled && auth.loggedIn) {
+      const alt = await Promise.race([uncensor.find(track), new Promise((r) => setTimeout(() => r(null), 2500))]);
+      if (id !== this.loadId) return;
+      if (alt) {
+        const altUrl = await uncensor.resolve(alt);
+        if (id !== this.loadId) return;
+        if (altUrl) { track.substitute = { ...alt, url: altUrl }; playUrl = altUrl; }
+      }
+    }
+    renderSubstitute();
+    if (!playUrl) {
       toast(auth.loggedIn ? 'Трек недоступен' : 'Полная версия — после входа');
       return this.skipBroken();
     }
-    this.attach(track.url, id, track);
+    this.attach(playUrl, id, track);
   },
 
   attach(url, id, track, retried = false) {
@@ -1146,6 +1168,9 @@ function renderNowPlaying() {
   const bgImage = t && t.cover(135) ? `url("${t.cover(135).replace(/"/g, '%22')}")` : 'none';
   $$('.fs-bg-layer').forEach((layer) => { layer.style.backgroundImage = bgImage; });
   bridge.trackTitle(t ? `${t.artist} — ${t.title}` : '');
+  renderAddState();
+  renderSubstitute();
+  animateSwap();
   renderQueue();
   updateMediaSession(true);
   renderProgress();
@@ -1242,6 +1267,8 @@ document.addEventListener('click', (e) => {
   else if (act === 'prev') player.prev();
   else if (act === 'shuffle') player.setShuffle(!player.shuffle);
   else if (act === 'repeat') player.cycleRepeat();
+  else if (act === 'add') library.toggle(player.current);
+  else if (act === 'download') downloadTrack(player.current);
 });
 bridge.onMedia((action) => {
   if (action === 'toggle') player.toggle();
@@ -1443,6 +1470,7 @@ const sheet = {
 
   hide(velocity = 0) {
     this.open = false;
+    if (document.body.classList.contains('immersive')) setImmersive(false);
     this.cover(false);
     const finish = () => { fs.hidden = true; };
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) { finish(); return; }
@@ -1501,12 +1529,381 @@ $('#bar-track').addEventListener('click', (e) => { if (!e.target.closest('.artis
 $('#expand').addEventListener('click', () => sheet.show());
 $('#fs-close').addEventListener('click', () => sheet.hide());
 
+// --- Мои аудио: добавить / убрать -----------------------------------------------------------
+
+const library = {
+  keys: new Set(),
+  loaded: false,
+
+  async load() {
+    this.keys.clear();
+    this.loaded = false;
+    if (!auth.loggedIn || !auth.me) return renderAddState();
+    try {
+      const resp = await vk('audio.get', { owner_id: auth.me.id, count: 6000 });
+      (resp.items || []).forEach((a) => this.keys.add(`${a.owner_id}_${a.id}`));
+      this.loaded = true;
+    } catch {
+      /* не страшно — кнопка просто покажет «добавить» */
+    }
+    renderAddState();
+  },
+
+  has(t) { return Boolean(t) && this.keys.has(t.key); },
+
+  async toggle(t) {
+    if (!t) return;
+    if (!auth.loggedIn) { openLogin(); return; }
+    try {
+      if (this.has(t)) {
+        try {
+          await vk('audio.delete', { audio_id: t.id, owner_id: auth.me.id }, { cache: false });
+        } catch {
+          await vk('audio.delete', { audio_id: t.id, owner_id: t.owner_id }, { cache: false });
+        }
+        this.keys.delete(t.key);
+        toast('Убрано из Моих аудио');
+      } else {
+        const params = { audio_id: t.id, owner_id: t.owner_id };
+        if (t.access_key) params.access_key = t.access_key;
+        await vk('audio.add', params, { cache: false });
+        this.keys.add(t.key);
+        toast('Добавлено в Мои аудио');
+      }
+      apiCache.clear(); // «Моя музыка» должна обновиться
+    } catch (err) {
+      toast(`Не получилось: ${err.message}`);
+    }
+    renderAddState();
+  },
+};
+
+function renderAddState() {
+  const added = library.has(player.current);
+  $$('[data-act="add"]').forEach((b) => {
+    b.classList.toggle('added', added);
+    b.title = added ? 'Убрать из Моих аудио' : 'Добавить в Мои аудио';
+  });
+}
+
+// --- Скачивание ---------------------------------------------------------------------------
+
+let downloading = false;
+async function downloadTrack(t) {
+  if (!t || downloading) return;
+  if (!auth.loggedIn) { toast('Скачивание — после входа во ВКонтакте'); openLogin(); return; }
+  const src = t.substitute || t; // качаем ту версию, что играет (в т.ч. без цензуры)
+  let url = src.url;
+  if (!url) {
+    try {
+      const [fresh] = await vk('audio.getById', { audios: src.fullId }, { cache: false });
+      url = fresh && fresh.url;
+    } catch {
+      url = '';
+    }
+  }
+  if (!url) { toast('Этот трек нельзя скачать'); return; }
+  downloading = true;
+  const buttons = $$('[data-act="download"]');
+  buttons.forEach((b) => { b.classList.add('busy'); b.style.setProperty('--dl', '0%'); });
+  const res = await bridge.download({ key: t.key, url, title: t.title, artist: t.artist, album: t.album, cover: t.cover(600) });
+  buttons.forEach((b) => b.classList.remove('busy'));
+  downloading = false;
+  if (res.ok) toast('Сохранено — показать в папке', { onClick: () => bridge.showFile(res.path), duration: 5000 });
+  else if (!res.canceled) toast(`Не удалось скачать: ${res.error || 'ошибка'}`);
+}
+bridge.onDownloadProgress(({ progress }) => {
+  $$('[data-act="download"]').forEach((b) => b.style.setProperty('--dl', `${Math.round(progress * 100)}%`));
+});
+
+// --- Эквалайзер (Web Audio) ---------------------------------------------------------------
+
+const eq = {
+  freqs: [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000],
+  presets: {
+    'Обычный': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    'Бас': [7, 6, 4.5, 2, 0, 0, 0, 0, 0, 0],
+    'Поп': [-1, 1, 3, 4, 3, 1, -1, -1, 0, 0],
+    'Рок': [4, 3, 1.5, -1, -1, 1, 3, 4, 4, 4],
+    'Хип-хоп': [5, 4.5, 2, 3, -1, -1, 1, -0.5, 2, 3],
+    'Электроника': [5, 4, 1, 0, -1.5, 1, 0, 2, 4, 5],
+    'Вокал': [-2, -2, -1, 1, 3.5, 4, 3, 1.5, 0, -1],
+    'Акустика': [3, 3, 2, 1, 1.5, 1, 2, 3, 3, 2],
+    'Ночь': [-1, 0, 1, 1, 0, -1, -2, -3, -4, -5],
+  },
+  enabled: localStorage.getItem('eqOn') === '1',
+  preset: localStorage.getItem('eqPreset') || 'Обычный',
+  gains: JSON.parse(localStorage.getItem('eqGains') || 'null') || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  ctx: null,
+  filters: [],
+  analyser: null,
+
+  // цепочка: <audio> → 10 фильтров → анализатор (для «пульса» обложки) → динамики
+  init() {
+    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    try {
+      const ctx = new AudioContext();
+      const source = ctx.createMediaElementSource(audio);
+      this.filters = this.freqs.map((f, i) => {
+        const b = ctx.createBiquadFilter();
+        b.type = i === 0 ? 'lowshelf' : i === this.freqs.length - 1 ? 'highshelf' : 'peaking';
+        b.frequency.value = f;
+        b.Q.value = 1.1;
+        return b;
+      });
+      this.analyser = ctx.createAnalyser();
+      this.analyser.fftSize = 512;
+      this.analyser.smoothingTimeConstant = 0.6;
+      [source, ...this.filters, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
+      this.ctx = ctx;
+      this.apply();
+    } catch (err) {
+      console.warn('Эквалайзер недоступен', err);
+    }
+  },
+
+  apply() {
+    this.filters.forEach((f, i) => { f.gain.value = this.enabled ? this.gains[i] : 0; });
+    $('#eq-btn').classList.toggle('on', this.enabled);
+    $('#eq-panel').classList.toggle('off', !this.enabled);
+  },
+
+  save() {
+    localStorage.setItem('eqOn', this.enabled ? '1' : '0');
+    localStorage.setItem('eqPreset', this.preset);
+    localStorage.setItem('eqGains', JSON.stringify(this.gains));
+  },
+
+  setPreset(name) {
+    this.preset = name;
+    this.gains = [...this.presets[name]];
+    this.enabled = true;
+    $('#eq-on').checked = true;
+    this.save();
+    this.apply();
+    this.render();
+  },
+
+  render() {
+    $('#eq-on').checked = this.enabled;
+    $('#eq-presets').replaceChildren(...Object.keys(this.presets).map((name) => el('button', {
+      class: 'eq-chip' + (name === this.preset ? ' active' : ''), text: name, onclick: () => this.setPreset(name),
+    })));
+    $('#eq-bands').replaceChildren(...this.freqs.map((f, i) => {
+      const input = el('input', { type: 'range', min: '-12', max: '12', step: '0.5', value: String(this.gains[i]), 'aria-label': `${f} Гц` });
+      setFill(input);
+      input.addEventListener('input', () => {
+        this.gains[i] = Number(input.value);
+        this.preset = 'Свой';
+        $$('.eq-chip').forEach((c) => c.classList.remove('active'));
+        setFill(input);
+        this.apply();
+        this.save();
+      });
+      return el('div', { class: 'eq-band' }, input, el('span', { text: f >= 1000 ? `${f / 1000}k` : String(f) }));
+    }));
+    this.apply();
+  },
+};
+
+$('#eq-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const panel = $('#eq-panel');
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) eq.render();
+});
+$('#eq-on').addEventListener('change', () => {
+  eq.enabled = $('#eq-on').checked;
+  eq.save();
+  eq.apply();
+});
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('#eq-panel, #eq-btn')) $('#eq-panel').hidden = true;
+});
+
+// --- Подмена зацензуренных треков оригиналом ---------------------------------------------
+// Ищем во ВКонтакте тот же трек без цензуры: совпадают исполнитель, название и длительность,
+// и это точно не ремикс / slowed / cover / live и т.п. Предпочтение — версии с отметкой 18+,
+// затем загруженным пользователями копиям релиза.
+
+const NOT_ORIGINAL = [
+  'remix', 'rmx', 'ремикс', 'slowed', 'slow', 'sped', 'speed up', 'speedup', 'nightcore', 'reverb', 'реверб',
+  'cover', 'кавер', 'karaoke', 'караоке', 'instrumental', 'инструментал', 'минус', 'minus', 'live', 'лайв',
+  'концерт', 'acoustic', 'акустика', 'edit', 'mashup', 'мэшап', 'bass boost', 'bass boosted', '8d', 'phonk',
+  'version', 'версия', 'demo', 'демо', 'radio', 'tiktok', 'tik tok', 'extended', 'ver', 'перепев', 'пародия',
+  'parody', 'mix', 'vip', 'bootleg', 'flip', 'rework', 'snippet', 'сниппет', 'нарезка', 'clean', 'censored',
+];
+const notOriginalRe = new RegExp(`(?<![\\p{L}\\p{N}])(${NOT_ORIGINAL.map((w) => w.replace(/ /g, '\\s*')).join('|')})(?![\\p{L}\\p{N}])`, 'iu');
+
+function normText(text) {
+  return String(text || '').toLowerCase().replace(/ё/g, 'е')
+    .replace(/\((feat|ft|prod)[^)]*\)|\[(feat|ft|prod)[^\]]*\]/g, ' ')
+    .replace(/\s(feat|ft)\.?\s.*$/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+function similar(a, b) {
+  if (a === b) return 1;
+  if (!a || !b) return 0;
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return 1 - prev[n] / Math.max(m, n);
+}
+
+const uncensor = {
+  enabled: localStorage.getItem('uncensor') !== '0', // включено по умолчанию
+  memo: JSON.parse(localStorage.getItem('uncensorMemo') || '{}'),
+
+  remember(key, value) {
+    this.memo[key] = value;
+    const keys = Object.keys(this.memo);
+    if (keys.length > 800) keys.slice(0, keys.length - 800).forEach((k) => delete this.memo[k]);
+    localStorage.setItem('uncensorMemo', JSON.stringify(this.memo));
+  },
+
+  isCandidate(orig, c) {
+    if (c.key === orig.key) return false;
+    // не ремикс и т.п. (если сам оригинал не такой)
+    const origTag = notOriginalRe.test(`${orig.title} ${orig.subtitle}`);
+    if (!origTag && notOriginalRe.test(`${c.title} ${c.subtitle}`)) return false;
+    // та же длительность — значит, та же запись, а не другая версия
+    if (!orig.duration || Math.abs(c.duration - orig.duration) > 3) return false;
+    // то же название (допускаем мелкие отличия в написании)
+    if (similar(normText(c.title), normText(orig.title)) < 0.85) return false;
+    // тот же исполнитель
+    const mainArtist = normText((orig.artists[0] && orig.artists[0].name) || orig.artist.split(/,|&/)[0]);
+    const cArtist = normText(c.artist);
+    if (!cArtist.includes(mainArtist) && similar(cArtist, normText(orig.artist)) < 0.8) return false;
+    // берём только версии с отметкой 18+ или загруженные пользователями копии
+    return c.explicit || c.owner_id > 0;
+  },
+
+  async find(track) {
+    if (!this.enabled || !auth.loggedIn || !track || track.explicit || !track.isLicensed) return null;
+    if (track.key in this.memo) {
+      const hit = this.memo[track.key];
+      if (!hit) return null;
+      return { ...hit, url: '' };
+    }
+    const query = `${(track.artists[0] && track.artists[0].name) || track.artist.split(/,|&/)[0]} ${track.title}`;
+    let items = [];
+    try {
+      const resp = await vk('audio.search', { q: query, count: 40, auto_complete: 0 }, { cache: false });
+      items = (resp.items || []).map(normTrack);
+    } catch {
+      return null;
+    }
+    const candidates = items.filter((c) => this.isCandidate(track, c))
+      .sort((a, b) => (b.explicit - a.explicit) || ((b.owner_id < 0) - (a.owner_id < 0)) || (Math.abs(a.duration - track.duration) - Math.abs(b.duration - track.duration)));
+    const best = candidates[0] || null;
+    this.remember(track.key, best ? { key: best.key, fullId: best.fullId, title: best.title, artist: best.artist } : null);
+    return best;
+  },
+
+  // ссылка на найденную версию (кэш хранит только ID — ссылки ВК живут недолго)
+  async resolve(alt) {
+    if (alt.url) return alt.url;
+    try {
+      const [fresh] = await vk('audio.getById', { audios: alt.fullId }, { cache: false });
+      return (fresh && fresh.url) || '';
+    } catch {
+      return '';
+    }
+  },
+};
+
+$('#uncensor-on').checked = uncensor.enabled;
+$('#uncensor-on').addEventListener('change', () => {
+  uncensor.enabled = $('#uncensor-on').checked;
+  localStorage.setItem('uncensor', uncensor.enabled ? '1' : '0');
+  toast(uncensor.enabled ? 'Зацензуренные треки будут подменяться оригиналом' : 'Подмена треков выключена');
+});
+
+function renderSubstitute() {
+  const t = player.current;
+  $('#uncensored-badge').hidden = !(t && t.substitute);
+}
+
+// --- Полноэкранный: живее ------------------------------------------------------------------
+
+// «пульс»: обложка и подсветка дышат в такт басу
+const pulse = {
+  raf: 0,
+  level: 0,
+  data: null,
+  start() {
+    if (this.raf || !eq.analyser || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    this.data = new Uint8Array(eq.analyser.frequencyBinCount);
+    const tick = () => {
+      if (!sheet.open || audio.paused || document.body.classList.contains('paused')) {
+        this.raf = 0;
+        this.level = 0;
+        $('#fs').style.setProperty('--beat', '0');
+        return;
+      }
+      eq.analyser.getByteFrequencyData(this.data);
+      let sum = 0;
+      for (let i = 1; i <= 6; i++) sum += this.data[i];
+      const low = sum / 6 / 255;
+      const hit = Math.max(0, (low - 0.55) / 0.45);
+      this.level = Math.max(hit, this.level * 0.88);
+      $('#fs').style.setProperty('--beat', this.level.toFixed(3));
+      this.raf = requestAnimationFrame(tick);
+    };
+    this.raf = requestAnimationFrame(tick);
+  },
+};
+audio.addEventListener('play', () => { eq.init(); pulse.start(); });
+
+// лёгкий наклон обложки за курсором
+$('.fs-main').addEventListener('pointermove', (e) => {
+  const cover = $('#fs-cover');
+  const r = cover.getBoundingClientRect();
+  const x = (e.clientX - (r.left + r.width / 2)) / r.width;
+  const y = (e.clientY - (r.top + r.height / 2)) / r.height;
+  $('#fs').style.setProperty('--ry', `${Math.max(-1, Math.min(1, x)) * 6}deg`);
+  $('#fs').style.setProperty('--rx', `${Math.max(-1, Math.min(1, -y)) * 6}deg`);
+});
+$('.fs-main').addEventListener('pointerleave', () => {
+  $('#fs').style.setProperty('--rx', '0deg');
+  $('#fs').style.setProperty('--ry', '0deg');
+});
+
+// смена трека — обложка и название «въезжают»
+let lastSwapKey = null;
+function animateSwap() {
+  const key = player.current && player.current.key;
+  if (!key || key === lastSwapKey) return;
+  lastSwapKey = key;
+  if (!sheet.open) return;
+  for (const node of [$('#fs-cover'), $('.fs-titles')]) {
+    node.classList.remove('swap');
+    void node.offsetWidth;
+    node.classList.add('swap');
+  }
+}
+
+// режим «только плеер на весь экран»
+function setImmersive(on) {
+  if (on && !sheet.open) sheet.show();
+  document.body.classList.toggle('immersive', on);
+  bridge.window(on ? 'fullscreen' : 'exit-fullscreen');
+}
+$('#fs-immersive').addEventListener('click', () => setImmersive(!document.body.classList.contains('immersive')));
+
 // --- Клавиатура ----------------------------------------------------------------------------
 
 document.addEventListener('keydown', (e) => {
   const typing = e.target.closest('input, textarea');
+  if (e.key === 'F11') { e.preventDefault(); setImmersive(!document.body.classList.contains('immersive')); return; }
   if (e.key === 'Escape') {
-    if (!fs.hidden) sheet.hide();
+    if (document.body.classList.contains('immersive')) setImmersive(false);
+    else if (!$('#eq-panel').hidden) $('#eq-panel').hidden = true;
+    else if (!fs.hidden) sheet.hide();
     else if (!loginModal.hidden) closeLogin(true);
     return;
   }
@@ -1526,7 +1923,10 @@ bridge.onWindowVisible((visible) => {
 });
 
 $$('[data-window]').forEach((btn) => btn.addEventListener('click', () => bridge.window(btn.dataset.window)));
-bridge.onWindowState(({ maximized }) => $('#window-buttons').classList.toggle('maximized', maximized));
+bridge.onWindowState(({ maximized, fullscreen }) => {
+  $('#window-buttons').classList.toggle('maximized', maximized);
+  if (!fullscreen) document.body.classList.remove('immersive');
+});
 
 // --- Старт ---------------------------------------------------------------------------------
 
@@ -1539,5 +1939,6 @@ bridge.onWindowState(({ maximized }) => $('#window-buttons').classList.toggle('m
   const state = await bridge.authState();
   auth.loggedIn = state.loggedIn;
   await refreshMe();
+  library.load();
   router.go('home');
 })();
