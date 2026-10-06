@@ -14,23 +14,21 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
+          node-version: 22
+          cache: npm
       - name: Install
-        run: python -m pip install -r requirements.txt pyinstaller
-      - name: Check imports
-        run: python -c "import vkplayer.app, vkplayer.auth"
+        run: npm ci
       - name: Build
-        run: pyinstaller --noconfirm --windowed --name VKPlayer --collect-all curl_cffi run.py
-      - name: Zip
-        run: Compress-Archive -Path dist/VKPlayer -DestinationPath VKPlayer-windows.zip
+        run: npm run dist
       - uses: actions/upload-artifact@v4
         with:
           name: VKPlayer-windows
-          path: VKPlayer-windows.zip
+          path: |
+            dist/*.exe
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: VKPlayer-windows.zip
+          files: dist/*.exe
