@@ -108,7 +108,7 @@ function normTrack(a) {
     title: a.title || '',
     subtitle: a.subtitle || '',
     artist: a.artist || '',
-    artists: (a.main_artists || []).map((x) => x.name),
+    artists: (a.main_artists || []).filter((x) => x.id && x.name).map((x) => ({ id: x.id, name: x.name })),
     duration: a.duration || 0,
     url: a.url || '',
     explicit: Boolean(a.is_explicit),
@@ -134,11 +134,20 @@ function normPlaylist(p) {
 }
 
 // Раскладываем ответ catalog.getAudio / catalog.getSection в блоки
-function parseCatalog(resp) {
+function artistPhoto(artist, minWidth = 300) {
+  const photos = (artist && artist.photo) || [];
+  const sorted = [...photos].sort((a, b) => a.width - b.width);
+  const fit = sorted.find((p) => p.width >= minWidth) || sorted[sorted.length - 1];
+  return fit ? fit.url : '';
+}
+
+function parseCatalog(resp, explicitSection = null) {
   const audios = new Map((resp.audios || []).map((a) => [`${a.owner_id}_${a.id}`, a]));
   const playlists = new Map((resp.playlists || []).map((p) => [`${p.owner_id}_${p.id}`, p]));
+  const artists = new Map((resp.artists || []).map((a) => [String(a.id), a]));
   const catalog = resp.catalog;
-  const section = resp.section
+  const section = explicitSection
+    || resp.section
     || (catalog && (catalog.sections.find((s) => s.id === catalog.default_section) || catalog.sections[0]))
     || { blocks: [] };
   const blocks = [];
@@ -157,10 +166,43 @@ function parseCatalog(resp) {
     } else if (b.data_type === 'music_playlists') {
       const items = (b.playlists_ids || []).map((id) => playlists.get(idOf(id))).filter(Boolean).map(normPlaylist);
       if (items.length) blocks.push({ kind: 'playlists', title: header ? header.title : b.title, action: header && header.action, items, nextFrom: b.next_from });
+    } else if (b.data_type === 'music_artists' || b.data_type === 'artists') {
+      const items = (b.artists_ids || []).map((id) => artists.get(String(id))).filter(Boolean)
+        .map((a) => ({ id: a.id, name: a.name, photo: artistPhoto(a, 200) }));
+      if (items.length) blocks.push({ kind: 'artists', title: header ? header.title : b.title, items });
     }
     header = null;
   }
   return { title: section.title || '', id: section.id, blocks, nextFrom: section.next_from };
+}
+
+// Раздел по адресу ВК. Для вошедшего пользователя ВК отвечает набором вкладок —
+// берём вкладку с нужным адресом, а если её нет, открываем «Показать все» нужного блока.
+const targetOf = (u) => {
+  try {
+    const x = new URL(u);
+    return [x.pathname, x.searchParams.get('block') || '', x.searchParams.get('section') || ''].join('|');
+  } catch {
+    return '';
+  }
+};
+async function catalogByUrl(url) {
+  const resp = await vk('catalog.getAudio', { url, need_blocks: 1 });
+  const want = targetOf(url);
+  const sections = (resp.catalog && resp.catalog.sections) || [];
+  const exact = sections.find((s) => targetOf(s.url) === want);
+  if (exact) return parseCatalog(resp, exact);
+  for (const sec of sections) {
+    for (const b of sec.blocks || []) {
+      const showAll = b.meta && b.meta.show_all_info && b.meta.show_all_info.section_id;
+      if (showAll && targetOf(b.url) === want) return parseCatalog(await vk('catalog.getSection', { section_id: showAll }));
+      for (const a of b.actions || []) {
+        if (a.section_id && a.action && targetOf(a.action.url) === want) return parseCatalog(await vk('catalog.getSection', { section_id: a.section_id }));
+      }
+    }
+  }
+  if (sections.length <= 1) return parseCatalog(resp);
+  return null;
 }
 
 // --- Состояние входа ----------------------------------------------------------------------
@@ -247,9 +289,32 @@ function trackRow(track, list, index, { number = false } = {}) {
     el('div', { class: 'row-overlay', html: `${ICON.play.replace('<svg', '<svg class="icon-play"')}<span class="eq"><i></i><i></i><i></i></span>` })),
   el('div', { class: 'row-text' },
     el('div', { class: 'row-title' }, track.title + (track.subtitle ? ` (${track.subtitle})` : ''), track.explicit ? el('span', { class: 'explicit', text: 'E' }) : null),
-    el('div', { class: 'row-artist', text: track.artist })),
+    artistLine(track, 'row-artist')),
   el('div', { class: 'row-dur', text: fmt(track.duration) }));
   return row;
+}
+
+// Имена артистов — ссылки на их страницы
+function artistLine(track, cls) {
+  const line = el('div', { class: cls });
+  if (!track.artists.length) {
+    line.textContent = track.artist;
+    return line;
+  }
+  track.artists.forEach((a, i) => {
+    if (i) line.append(', ');
+    line.append(el('span', {
+      class: 'artist-link', text: a.name,
+      onclick: (e) => { e.stopPropagation(); router.go('artist', { id: a.id, name: a.name }); },
+    }));
+  });
+  return line;
+}
+
+function artistChip(a) {
+  return el('button', { class: 'artist-chip', onclick: () => router.go('artist', { id: a.id, name: a.name }) },
+    el('div', { class: 'artist-chip-photo' }, a.photo ? el('img', { src: a.photo, alt: '', loading: 'lazy' }) : el('span', { html: ICON.user })),
+    el('div', { class: 'artist-chip-name', text: a.name }));
 }
 
 function trackGrid(tracks) {
@@ -304,6 +369,9 @@ function renderBlocks(blocks, { limit = 99 } = {}) {
     } else if (block.kind === 'playlists') {
       frag.append(el('section', { class: 'section' }, sectionHead(block.title, block.action),
         el('div', { class: 'card-row' }, block.items.map(playlistCard))));
+    } else if (block.kind === 'artists') {
+      frag.append(el('section', { class: 'section' }, sectionHead(block.title || 'Артисты'),
+        el('div', { class: 'artist-row' }, block.items.map(artistChip))));
     }
   }
   return frag;
@@ -359,17 +427,53 @@ function pagedTrackList(tracks, sectionId, nextFrom) {
 
 // --- Экраны --------------------------------------------------------------------------------
 
+function mixCard() {
+  const card = el('div', { class: 'mix' + (player.mix ? ' on' : ''), id: 'mix-card' },
+    el('div', { class: 'mix-text' },
+      el('div', { class: 'mix-title', text: 'VK Микс' }),
+      el('div', { class: 'mix-sub', text: auth.loggedIn ? 'Бесконечный поток музыки под ваш вкус' : 'Войдите, чтобы слушать микс под ваш вкус' })),
+    el('button', {
+      class: 'mix-play', title: 'Слушать VK Микс',
+      html: `${ICON.play.replace('<svg', '<svg class="icon-play"')}<svg viewBox="0 0 24 24" class="icon-pause"><rect class="fill" x="6" y="5" width="4" height="14" rx="1.2"/><rect class="fill" x="14" y="5" width="4" height="14" rx="1.2"/></svg>`,
+      onclick: () => {
+        if (!auth.loggedIn) { openLogin(); return; }
+        if (player.mix) player.toggle(); else player.startMix();
+      },
+    }));
+  return card;
+}
+
 async function viewHome() {
   const data = parseCatalog(await vk('catalog.getAudio', { url: 'https://vk.ru/audio', need_blocks: 1 }));
-  const allTracks = data.blocks.filter((b) => b.kind === 'tracks').flatMap((b) => b.tracks);
   return [
-    pageHead('Обзор', auth.me ? `Привет, ${auth.me.first_name}` : 'Музыка для вас', 'Подборки, новинки и чарты', playButtons(() => allTracks)),
+    pageHead('Обзор', auth.me ? `Привет, ${auth.me.first_name}` : 'Музыка для вас', null),
+    mixCard(),
     renderBlocks(data.blocks, { limit: 8 }),
   ];
 }
 
+async function viewArtist({ id, name }) {
+  const resp = await vk('catalog.getAudioArtist', { artist_id: id, need_blocks: 1 });
+  const data = parseCatalog(resp);
+  const artist = (resp.artists || []).find((a) => String(a.id) === String(id)) || (resp.artists || [])[0] || { name };
+  const photo = artistPhoto(artist, 800);
+  const top = data.blocks.find((b) => b.kind === 'tracks');
+  const topTracks = top ? top.tracks : [];
+  if (top) top.layout = 'list';
+  return [
+    el('div', { class: 'artist-hero' + (photo ? '' : ' no-photo') },
+      photo ? el('img', { class: 'artist-hero-bg', src: photo, alt: '' }) : null,
+      el('div', { class: 'artist-hero-text' },
+        el('div', { class: 'eyebrow', text: 'Артист' }),
+        el('h1', { class: 'page-title', text: artist.name || name }),
+        topTracks.length ? el('div', { class: 'page-actions' }, playButtons(() => topTracks)) : null)),
+    renderBlocks(data.blocks.map((b) => (b === top ? { ...b, tracks: b.tracks.slice(0, 10) } : b))),
+  ];
+}
+
 async function viewCatalogList(url, eyebrow, title) {
-  const data = parseCatalog(await vk('catalog.getAudio', { url, need_blocks: 1 }));
+  const data = await catalogByUrl(url);
+  if (!data) throw new Error('ВКонтакте не отдал этот раздел');
   const block = data.blocks.find((b) => b.kind === 'tracks');
   if (!block) return [pageHead(eyebrow, title), renderBlocks(data.blocks)];
   const tracks = block.tracks;
@@ -412,17 +516,16 @@ async function viewMy() {
 async function viewRecs() {
   if (!auth.loggedIn) return loginPrompt('Для вас');
   try {
-    const data = parseCatalog(await vk('catalog.getAudio', { url: 'https://vk.ru/audio?section=recoms', need_blocks: 1 }));
-    if (data.blocks.length) {
-      const all = data.blocks.filter((b) => b.kind === 'tracks').flatMap((b) => b.tracks);
-      return [pageHead('Подобрано алгоритмами', 'Для вас', null, all.length ? playButtons(() => all) : []), renderBlocks(data.blocks)];
-    }
+    const resp = await vk('audio.getRecommendations', { count: 100 });
+    const tracks = (resp.items || resp || []).map(normTrack);
+    if (tracks.length) return [pageHead('Подобрано алгоритмами', 'Для вас', tracksWord(tracks.length), playButtons(() => tracks)), trackList(tracks)];
   } catch {
-    /* попробуем другой способ */
+    /* попробуем раздел рекомендаций */
   }
-  const resp = await vk('audio.getRecommendations', { count: 100 });
-  const tracks = (resp.items || []).map(normTrack);
-  return [pageHead('Подобрано алгоритмами', 'Для вас', tracksWord(tracks.length), playButtons(() => tracks)), trackList(tracks)];
+  const data = await catalogByUrl('https://vk.ru/audio?section=recoms');
+  if (!data || !data.blocks.length) throw new Error('ВКонтакте пока не подобрал рекомендации');
+  const all = data.blocks.filter((b) => b.kind === 'tracks').flatMap((b) => b.tracks);
+  return [pageHead('Подобрано алгоритмами', 'Для вас', null, all.length ? playButtons(() => all) : []), renderBlocks(data.blocks)];
 }
 
 async function viewPlaylists() {
@@ -505,6 +608,7 @@ const ROUTES = {
   section: viewSection,
   playlist: viewPlaylist,
   search: viewSearch,
+  artist: viewArtist,
 };
 
 const router = {
@@ -628,8 +732,12 @@ async function updateSuggest() {
     }
   }
   if (token !== suggestToken) return;
-  const artists = [...new Set(items.flatMap((t) => t.artists.length ? t.artists : [t.artist]).filter(Boolean))]
-    .filter((name) => name.toLowerCase().includes(q.toLowerCase().split(' ')[0])).slice(0, 3);
+  const seenArtists = new Set();
+  const artists = items.flatMap((t) => t.artists).filter((a) => {
+    if (seenArtists.has(a.id)) return false;
+    seenArtists.add(a.id);
+    return a.name.toLowerCase().includes(q.toLowerCase().split(' ')[0]);
+  }).slice(0, 3);
   const nodes = [
     el('button', { class: 'suggest-item', onclick: () => runSearch(q) },
       el('span', { class: 's-icon', html: ICON.search }),
@@ -637,9 +745,9 @@ async function updateSuggest() {
   ];
   if (artists.length) {
     nodes.push(el('div', { class: 'suggest-head', text: 'Артисты' }));
-    artists.forEach((name) => nodes.push(el('button', { class: 'suggest-item', onclick: () => { searchInput.value = name; runSearch(name); } },
+    artists.forEach((a) => nodes.push(el('button', { class: 'suggest-item', onclick: () => { closeSuggest(); searchInput.blur(); router.go('artist', { id: a.id, name: a.name }); } },
       el('span', { class: 's-icon', html: ICON.user }),
-      el('span', { class: 's-text' }, el('div', { class: 's-title', text: name }), el('div', { class: 's-sub', text: 'Артист' })))));
+      el('span', { class: 's-text' }, el('div', { class: 's-title', text: a.name }), el('div', { class: 's-sub', text: 'Артист' })))));
   }
   if (items.length) {
     nodes.push(el('div', { class: 'suggest-head', text: 'Треки' }));
@@ -683,8 +791,47 @@ const player = {
   loadId: 0,
   skips: 0,
 
+  mix: false,
+  mixLoading: false,
+
+  async startMix() {
+    const tracks = await this.fetchMix(false);
+    if (!tracks.length) { toast('VK Микс сейчас недоступен'); return; }
+    this.mix = true;
+    this.queue = tracks;
+    this.order = [...tracks.keys()];
+    this.pos = 0;
+    renderMixState();
+    this.load();
+  },
+
+  async fetchMix(append) {
+    try {
+      const resp = await vk('audio.getStreamMixAudios', { mix_id: 'common', count: 10, append: append ? 1 : 0 }, { cache: false });
+      return (Array.isArray(resp) ? resp : resp.items || []).map(normTrack);
+    } catch (err) {
+      return [];
+    }
+  },
+
+  // микс бесконечный: подгружаем следующие треки заранее
+  async extendMix() {
+    if (!this.mix || this.mixLoading || this.pos < this.order.length - 3) return;
+    this.mixLoading = true;
+    const more = await this.fetchMix(true);
+    const seen = new Set(this.queue.map((t) => t.key));
+    for (const t of more) {
+      if (seen.has(t.key)) continue;
+      this.queue.push(t);
+      this.order.push(this.queue.length - 1);
+    }
+    this.mixLoading = false;
+    renderQueue();
+  },
+
   playList(tracks, index, { shuffle } = {}) {
     if (!tracks || !tracks.length) return;
+    if (this.mix) { this.mix = false; renderMixState(); }
     if (shuffle !== undefined) this.setShuffle(shuffle);
     const same = this.current && tracks[index] && tracks[index].key === this.current.key && this.queue === tracks;
     if (same) { this.toggle(); return; }
@@ -727,6 +874,7 @@ const player = {
   async load() {
     const track = this.queue[this.order[this.pos]];
     if (!track) return;
+    if (this.mix) this.extendMix();
     const id = ++this.loadId;
     this.current = track;
     renderNowPlaying();
@@ -799,6 +947,13 @@ const player = {
     if (!this.queue.length) return;
     if (auto && this.repeat === 'one') { audio.currentTime = 0; audio.play(); return; }
     if (this.pos + 1 >= this.order.length) {
+      if (this.mix) {
+        // микс не кончается: дожидаемся следующей порции и продолжаем
+        this.extendMix().then(() => {
+          if (this.pos + 1 < this.order.length) { this.pos += 1; this.load(); }
+        });
+        return;
+      }
       if (this.repeat === 'all' || !auto) {
         if (this.shuffle) this.buildOrder(this.order[0]);
         this.pos = 0;
@@ -919,6 +1074,11 @@ function renderQueue() {
     row.onclick = () => player.jumpTo(p);
     return row;
   }));
+}
+
+function renderMixState() {
+  const card = $('#mix-card');
+  if (card) card.classList.toggle('on', player.mix);
 }
 
 function renderModes() {
