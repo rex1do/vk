@@ -1,8 +1,8 @@
 {
   "name": "vk-player",
   "productName": "VK Player",
-  "version": "3.0.0",
-  "description": "Десктопный плеер для официальной ВК Музыки в стиле liquid glass",
+  "version": "4.0.0",
+  "description": "Десктопный плеер ВК Музыки со своим интерфейсом в стиле liquid glass",
   "main": "main.js",
   "license": "MIT",
   "scripts": {
@@ -11,7 +11,8 @@
   },
   "devDependencies": {
     "electron": "^38.0.0",
-    "electron-builder": "^26.0.0"
+    "electron-builder": "^26.0.0",
+    "hls.js": "^1.7.3"
   },
   "build": {
     "appId": "local.vkplayer",
@@ -19,7 +20,6 @@
     "files": [
       "main.js",
       "preload-shell.js",
-      "preload-vk.js",
       "shell/**",
       "build/icon.png"
     ],

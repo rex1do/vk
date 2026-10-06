@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data:; media-src 'self' https: blob:; connect-src https:; worker-src 'self' blob:; style-src 'self'; script-src 'self'">
   <title>VK Player</title>
   <link rel="stylesheet" href="shell.css">
 </head>
@@ -13,28 +13,33 @@
     <div class="ambient-layer" id="ambient-b"></div>
     <div class="ambient-blob blob-1"></div>
     <div class="ambient-blob blob-2"></div>
+    <div class="ambient-blob blob-3"></div>
     <div class="ambient-shade"></div>
+    <div class="ambient-grid"></div>
+    <span class="sparkle s1">✦</span><span class="sparkle s2">✦</span><span class="sparkle s3">✧</span>
   </div>
 
   <div class="app">
     <header class="titlebar drag">
       <div class="brand">
         <img src="../build/icon.png" alt="" class="brand-icon">
-        <span class="label">VK Player</span>
+        <span class="label brand-name">VK Player</span><span class="label brand-star">✦</span>
       </div>
       <div class="history">
-        <button class="icon-btn" id="back" title="Назад (Alt+←)">
+        <button class="icon-btn" id="back" title="Назад (Alt+←)" disabled>
           <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
         </button>
-        <button class="icon-btn" id="forward" title="Вперёд (Alt+→)">
+        <button class="icon-btn" id="forward" title="Вперёд (Alt+→)" disabled>
           <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
         </button>
       </div>
-      <form class="search glass" id="search-form">
-        <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg>
-        <input id="search" type="search" placeholder="Трек, артист, альбом" autocomplete="off" spellcheck="false">
-      </form>
-      <div class="spinner" id="spinner"></div>
+      <div class="search-wrap" id="search-wrap">
+        <form class="search glass" id="search-form" autocomplete="off">
+          <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg>
+          <input id="search" type="search" placeholder="Трек, артист, альбом" spellcheck="false">
+        </form>
+        <div class="suggest glass" id="suggest" hidden></div>
+      </div>
       <div class="window-buttons" id="window-buttons">
         <button class="win-btn" data-window="minimize" title="Свернуть">
           <svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg>
@@ -49,85 +54,174 @@
       </div>
     </header>
 
-    <aside class="sidebar glass">
+    <aside class="sidebar heavy">
       <nav>
-        <button class="item" data-section="home" title="Главная">
-          <svg viewBox="0 0 24 24"><path d="M4 11l8-6.5 8 6.5V20h-5v-5h-6v5H4z"/></svg><span class="label">Главная</span>
+        <div class="nav-caption">Музыка</div>
+        <button class="item" data-route="home" title="Обзор">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path class="fill" d="M15.5 8.5l-2 5-5 2 2-5z"/></svg><span class="label">Обзор</span>
         </button>
-        <button class="item" data-section="my" title="Моя музыка">
+        <button class="item" data-route="my" title="Моя музыка">
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg><span class="label">Моя музыка</span>
         </button>
-        <button class="item" data-section="recoms" title="Рекомендации">
-          <svg viewBox="0 0 24 24"><path class="fill" d="M11 3q1 7 8 8q-7 1-8 8q-1-7-8-8q7-1 8-8z"/></svg><span class="label">Рекомендации</span>
+        <button class="item" data-route="recs" title="Для вас">
+          <svg viewBox="0 0 24 24"><path class="fill" d="M11 3q1 7 8 8q-7 1-8 8q-1-7-8-8q7-1 8-8z"/></svg><span class="label">Для вас</span>
         </button>
-        <button class="item" data-section="playlists" title="Плейлисты">
+        <button class="item" data-route="playlists" title="Плейлисты">
           <svg viewBox="0 0 24 24"><path d="M4 6h12M4 11h12M4 16h7"/><path class="fill" d="M14.5 13.5l6 3.5-6 3.5z"/></svg><span class="label">Плейлисты</span>
         </button>
-        <div class="divider"></div>
-        <button class="item" data-section="chart" title="Чарт">
+        <div class="nav-caption">Открыть новое</div>
+        <button class="item" data-route="chart" title="Чарт">
           <svg viewBox="0 0 24 24"><path d="M5 20V12M12 20V5M19 20v-9"/></svg><span class="label">Чарт</span>
         </button>
-        <button class="item" data-section="new" title="Новинки">
+        <button class="item" data-route="new" title="Новинки">
           <svg viewBox="0 0 24 24"><path d="M12 4v4M12 16v4M4 12h4M16 12h4M6.3 6.3l2.8 2.8M14.9 14.9l2.8 2.8M6.3 17.7l2.8-2.8M14.9 9.1l2.8-2.8"/></svg><span class="label">Новинки</span>
         </button>
       </nav>
 
-      <div class="sidebar-bottom">
-        <button class="item login-item" id="login-btn" title="Войти во ВКонтакте" hidden>
-          <svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></svg><span class="label">Войти во ВКонтакте</span>
+      <div class="account" id="account">
+        <button class="item login-item" id="login-btn" title="Войти во ВКонтакте">
+          <svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></svg><span class="label">Войти</span>
         </button>
+        <div class="user" id="user" hidden>
+          <img class="avatar" id="user-avatar" alt="">
+          <span class="label user-name" id="user-name"></span>
+          <button class="icon-btn small label" id="logout-btn" title="Выйти из аккаунта">
+            <svg viewBox="0 0 24 24"><path d="M14 17l5-5-5-5M19 12H8M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4"/></svg>
+          </button>
+        </div>
       </div>
     </aside>
 
-    <!-- Сюда основной процесс ставит страницу ВК -->
-    <main class="stage glass" id="stage">
-      <div class="stage-loading" id="stage-loading">
-        <div class="spinner on"></div>
-      </div>
+    <main class="content" id="content">
+      <div class="view" id="view"></div>
     </main>
 
     <footer class="player glass idle" id="player">
-      <div class="track">
-        <div class="cover" id="cover">
-          <svg viewBox="0 0 24 24" class="cover-empty"><path d="M9.5 17.5V6l10-2v11.5"/><circle cx="7" cy="17.5" r="2.6" class="fill"/><circle cx="17" cy="15.5" r="2.6" class="fill"/></svg>
-          <img id="cover-img" alt="">
-        </div>
+      <div class="track" id="bar-track" title="Открыть плеер">
+        <div class="cover" id="bar-cover"><img alt=""></div>
         <div class="meta">
-          <div class="title" id="now-title">Ничего не играет</div>
-          <div class="artist" id="now-artist">Выберите трек</div>
+          <div class="title" id="bar-title">Ничего не играет</div>
+          <div class="artist" id="bar-artist">Выберите трек</div>
         </div>
       </div>
 
       <div class="center">
         <div class="controls">
-          <button class="icon-btn ctl" data-media="previoustrack" title="Предыдущий">
+          <button class="icon-btn toggle" data-act="shuffle" title="Перемешать">
+            <svg viewBox="0 0 24 24"><path d="M3 17h3c5 0 6-10 11-10h3.5M3 7h3c5 0 6 10 11 10h3.5"/><path d="M18 4.5l2.5 2.5L18 9.5M18 14.5l2.5 2.5-2.5 2.5"/></svg>
+          </button>
+          <button class="icon-btn" data-act="prev" title="Предыдущий">
             <svg viewBox="0 0 24 24"><path class="fill" d="M19 5L8.5 12 19 19z"/><rect class="fill" x="4.9" y="5" width="2.6" height="14" rx="1.2"/></svg>
           </button>
-          <button class="play" data-media="toggle" title="Играть / пауза (Ctrl+P)">
+          <button class="play" data-act="toggle" title="Играть / пауза (пробел)">
             <svg viewBox="0 0 24 24" class="icon-play"><path class="fill" d="M8 5l11.5 7L8 19z"/></svg>
             <svg viewBox="0 0 24 24" class="icon-pause"><rect class="fill" x="6" y="5" width="4" height="14" rx="1.2"/><rect class="fill" x="14" y="5" width="4" height="14" rx="1.2"/></svg>
           </button>
-          <button class="icon-btn ctl" data-media="nexttrack" title="Следующий">
+          <button class="icon-btn" data-act="next" title="Следующий">
             <svg viewBox="0 0 24 24"><path class="fill" d="M5 5l10.5 7L5 19z"/><rect class="fill" x="16.5" y="5" width="2.6" height="14" rx="1.2"/></svg>
+          </button>
+          <button class="icon-btn toggle repeat" data-act="repeat" title="Повтор">
+            <svg viewBox="0 0 24 24"><path d="M4 12v-1.5A3.5 3.5 0 0 1 7.5 7h12M17 4.5L19.5 7 17 9.5M20 12v1.5a3.5 3.5 0 0 1-3.5 3.5h-12M7 14.5L4.5 17 7 19.5"/></svg>
+            <span class="repeat-one">1</span>
           </button>
         </div>
         <div class="progress">
-          <span class="time" id="pos">0:00</span>
-          <input type="range" id="seek" min="0" max="1000" value="0" step="1" aria-label="Перемотка">
-          <span class="time" id="dur">0:00</span>
+          <span class="time" data-bind="pos">0:00</span>
+          <input type="range" class="seek" min="0" max="1000" value="0" aria-label="Перемотка">
+          <span class="time" data-bind="dur">0:00</span>
         </div>
       </div>
 
-      <div class="volume">
-        <button class="icon-btn" id="mute" title="Без звука">
-          <svg viewBox="0 0 24 24" class="vol-on"><path class="fill" d="M3.5 9h4l5-4.5v15l-5-4.5h-4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/></svg>
-          <svg viewBox="0 0 24 24" class="vol-off"><path class="fill" d="M3.5 9h4l5-4.5v15l-5-4.5h-4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>
+      <div class="right">
+        <div class="volume">
+          <button class="icon-btn mute" title="Без звука">
+            <svg viewBox="0 0 24 24" class="vol-on"><path class="fill" d="M3.5 9h4l5-4.5v15l-5-4.5h-4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+            <svg viewBox="0 0 24 24" class="vol-off"><path class="fill" d="M3.5 9h4l5-4.5v15l-5-4.5h-4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>
+          </button>
+          <input type="range" class="vol" min="0" max="100" value="80" aria-label="Громкость">
+        </div>
+        <button class="icon-btn" id="expand" title="Развернуть плеер">
+          <svg viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg>
         </button>
-        <input type="range" id="volume" min="0" max="100" value="100" aria-label="Громкость">
       </div>
     </footer>
   </div>
 
-  <script src="shell.js"></script>
+  <!-- Полноэкранный плеер -->
+  <section class="fullscreen" id="fs" hidden>
+    <div class="fs-glow" id="fs-glow"></div>
+    <div class="fs-top drag">
+      <div class="fs-grabber" id="fs-grabber" title="Потяните вниз, чтобы свернуть"></div>
+      <button class="icon-btn fs-close" id="fs-close" title="Свернуть (Esc)">
+        <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <div class="fs-caption" id="fs-caption">Сейчас играет</div>
+    </div>
+    <div class="fs-body">
+      <div class="fs-main">
+        <div class="fs-cover" id="fs-cover"><img alt=""></div>
+        <div class="fs-info">
+          <div class="fs-title" id="fs-title"></div>
+          <div class="fs-artist" id="fs-artist"></div>
+        </div>
+        <div class="progress fs-progress">
+          <span class="time" data-bind="pos">0:00</span>
+          <input type="range" class="seek" min="0" max="1000" value="0" aria-label="Перемотка">
+          <span class="time" data-bind="dur">0:00</span>
+        </div>
+        <div class="controls fs-controls">
+          <button class="icon-btn toggle" data-act="shuffle" title="Перемешать">
+            <svg viewBox="0 0 24 24"><path d="M3 17h3c5 0 6-10 11-10h3.5M3 7h3c5 0 6 10 11 10h3.5"/><path d="M18 4.5l2.5 2.5L18 9.5M18 14.5l2.5 2.5-2.5 2.5"/></svg>
+          </button>
+          <button class="icon-btn big" data-act="prev" title="Предыдущий">
+            <svg viewBox="0 0 24 24"><path class="fill" d="M19 5L8.5 12 19 19z"/><rect class="fill" x="4.9" y="5" width="2.6" height="14" rx="1.2"/></svg>
+          </button>
+          <button class="play big" data-act="toggle" title="Играть / пауза">
+            <svg viewBox="0 0 24 24" class="icon-play"><path class="fill" d="M8 5l11.5 7L8 19z"/></svg>
+            <svg viewBox="0 0 24 24" class="icon-pause"><rect class="fill" x="6" y="5" width="4" height="14" rx="1.2"/><rect class="fill" x="14" y="5" width="4" height="14" rx="1.2"/></svg>
+          </button>
+          <button class="icon-btn big" data-act="next" title="Следующий">
+            <svg viewBox="0 0 24 24"><path class="fill" d="M5 5l10.5 7L5 19z"/><rect class="fill" x="16.5" y="5" width="2.6" height="14" rx="1.2"/></svg>
+          </button>
+          <button class="icon-btn toggle repeat" data-act="repeat" title="Повтор">
+            <svg viewBox="0 0 24 24"><path d="M4 12v-1.5A3.5 3.5 0 0 1 7.5 7h12M17 4.5L19.5 7 17 9.5M20 12v1.5a3.5 3.5 0 0 1-3.5 3.5h-12M7 14.5L4.5 17 7 19.5"/></svg>
+            <span class="repeat-one">1</span>
+          </button>
+        </div>
+        <div class="volume fs-volume">
+          <button class="icon-btn mute" title="Без звука">
+            <svg viewBox="0 0 24 24" class="vol-on"><path class="fill" d="M3.5 9h4l5-4.5v15l-5-4.5h-4z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+            <svg viewBox="0 0 24 24" class="vol-off"><path class="fill" d="M3.5 9h4l5-4.5v15l-5-4.5h-4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>
+          </button>
+          <input type="range" class="vol" min="0" max="100" value="80" aria-label="Громкость">
+        </div>
+      </div>
+      <aside class="fs-queue glass">
+        <div class="fs-queue-title">Далее</div>
+        <div class="fs-queue-list" id="fs-queue"></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Вход: здесь показывается официальная страница входа ВК -->
+  <div class="login-modal" id="login-modal" hidden>
+    <div class="login-card glass">
+      <div class="login-head">
+        <div>
+          <div class="login-title">Вход во ВКонтакте</div>
+          <div class="login-sub">Официальная страница ВК. Пароль вводится только там.</div>
+        </div>
+        <button class="icon-btn" id="login-close" title="Закрыть">
+          <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg>
+        </button>
+      </div>
+      <div class="login-slot" id="login-slot"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="vendor/hls.min.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

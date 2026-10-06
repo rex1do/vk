@@ -1,20 +1,20 @@
-// Мост между оболочкой и основным процессом
+// Мост между интерфейсом и основным процессом
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('vkp', {
   platform: process.platform,
-  navigate: (section) => ipcRenderer.send('navigate', section),
-  search: (query) => ipcRenderer.send('search', query),
-  login: () => ipcRenderer.send('login'),
+  api: (method, params) => ipcRenderer.invoke('api', method, params),
+  authState: () => ipcRenderer.invoke('auth-state'),
+  login: (rect) => ipcRenderer.send('login', rect),
+  loginBounds: (rect) => ipcRenderer.send('login-bounds', rect),
+  loginCancel: () => ipcRenderer.send('login-cancel'),
   logout: () => ipcRenderer.send('logout'),
-  history: (direction) => ipcRenderer.send('history', direction),
-  media: (action, value) => ipcRenderer.send('media', action, value),
   window: (action) => ipcRenderer.send('window', action),
-  onWindowState: (fn) => ipcRenderer.on('window-state', (_e, state) => fn(state)),
-  stageBounds: (rect) => ipcRenderer.send('stage-bounds', rect),
+  trackTitle: (title) => ipcRenderer.send('track-title', title),
   ready: () => ipcRenderer.send('shell-ready'),
-  onNavState: (fn) => ipcRenderer.on('nav-state', (_e, state) => fn(state)),
-  onNowPlaying: (fn) => ipcRenderer.on('now-playing', (_e, info) => fn(info)),
-  onAuthState: (fn) => ipcRenderer.on('auth-state', (_e, state) => fn(state)),
+  onAuthChanged: (fn) => ipcRenderer.on('auth-changed', (_e, state) => fn(state)),
+  onLoginClosed: (fn) => ipcRenderer.on('login-closed', () => fn()),
+  onWindowState: (fn) => ipcRenderer.on('window-state', (_e, state) => fn(state)),
+  onMedia: (fn) => ipcRenderer.on('media', (_e, action) => fn(action)),
   onFocusSearch: (fn) => ipcRenderer.on('focus-search', () => fn()),
 });
