@@ -222,6 +222,14 @@ nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; overflo
 .row.playing { background: rgba(255,255,255,.08); }
 .row-num { width: 26px; text-align: right; color: var(--faint); font-variant-numeric: tabular-nums; font-weight: 600; flex: none; }
 .row.playing .row-num { color: #fff; }
+.row-num.chart { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 30px; text-align: center; color: var(--text); font-size: 15px; }
+.trend { display: block; width: 12px; height: 8px; flex: none; }
+.trend.up { background: #3ecf6e; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.trend.down { background: #ff5a5f; clip-path: polygon(0 0, 100% 0, 50% 100%); }
+.trend.same { height: 2px; width: 12px; border-radius: 1px; background: var(--faint); margin: 3px 0; }
+.trend.new { width: auto; height: auto; font-style: normal; font-size: 8.5px; font-weight: 800; letter-spacing: .04em; color: #3ecf6e; }
+.trend.new::after { content: 'NEW'; }
+.trend.crown { width: 16px; height: 11px; background: #ffc94a; clip-path: polygon(0 100%, 0 20%, 25% 55%, 50% 0, 75% 55%, 100% 20%, 100% 100%); }
 .row-cover { position: relative; width: 46px; height: 46px; border-radius: 11px; overflow: hidden; flex: none; background: rgba(255,255,255,.07); box-shadow: 0 4px 12px rgba(0,0,0,.3); }
 .row-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .row-overlay { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(10,10,20,.45); opacity: 0; transition: opacity .12s; }
@@ -534,6 +542,42 @@ body.paused *, body.paused *::before, body.paused *::after { animation-play-stat
 .mix-play svg { width: 28px; height: 28px; }
 .mix-play .icon-pause, body.is-playing .mix.on .mix-play .icon-play { display: none; }
 body.is-playing .mix.on .mix-play .icon-pause { display: block; }
+.mix-tune { margin-top: 14px; height: 32px; padding: 0 14px 0 10px; border-radius: 16px; display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,.1); color: var(--text); font-size: 13px; font-weight: 600; }
+.mix-tune:hover { background: rgba(255,255,255,.16); }
+.mix-tune .ico svg { width: 17px; height: 17px; }
+
+/* --- Настройки VK Микса --- */
+.mix-settings-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.5); animation: fadeIn .2s ease; }
+.mix-settings {
+  width: min(560px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 22px 24px 20px; border-radius: 28px;
+  background: rgba(24, 24, 34, .97); border: 1px solid rgba(255,255,255,.1); border-top-color: rgba(255,255,255,.2);
+  box-shadow: 0 40px 100px rgba(0,0,0,.6); animation: materialize .26s var(--spring);
+}
+.ms-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.ms-title { font-size: 21px; font-weight: 750; letter-spacing: -.02em; }
+.ms-close { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,.08); color: var(--muted); }
+.ms-close:hover { color: var(--text); background: rgba(255,255,255,.14); }
+.ms-close svg { width: 16px; height: 16px; }
+.ms-group { margin-top: 18px; }
+.ms-label { font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-bottom: 10px; }
+.ms-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.ms-options.big { grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); }
+.ms-opt {
+  min-height: 46px; padding: 0 10px; border-radius: 16px; background: rgba(255,255,255,.06); border: 1px solid transparent;
+  color: var(--text); font-size: 14px; font-weight: 600; transition: background .15s, border-color .15s, transform .15s var(--spring);
+}
+.ms-opt:hover { background: rgba(255,255,255,.1); }
+.ms-opt:active { transform: scale(.96); }
+.ms-opt.on { background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.55); }
+.ms-options.big .ms-opt { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px 12px; }
+.ms-icon { width: 46px; height: 46px; display: grid; place-items: center; font-size: 32px; line-height: 1; }
+.ms-icon img { width: 100%; height: 100%; object-fit: contain; }
+.ms-options.big .ms-text { font-size: 13px; font-weight: 600; color: var(--muted); }
+.ms-options.big .ms-opt.on .ms-text { color: var(--text); }
+.ms-foot { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; margin-top: 24px; }
+.ms-foot .btn { justify-content: center; height: 46px; }
+.ms-foot .btn:disabled { opacity: .4; pointer-events: none; }
+@media (max-width: 520px) { .ms-options { grid-template-columns: 1fr 1fr; } }
 
 /* --- Артист --- */
 .artist-hero {

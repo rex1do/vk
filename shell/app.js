@@ -40,6 +40,7 @@ const ICON = {
   minus: '<svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg>',
   download: '<svg viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/></svg>',
   sparkle: '<svg viewBox="0 0 24 24"><path class="fill" d="M11 3q1 7 8 8q-7 1-8 8q-1-7-8-8q7-1 8-8z"/></svg>',
+  tune: '<svg viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
   quote: '<svg viewBox="0 0 24 24"><path d="M5 6h14M5 10.5h10M5 15h12M5 19.5h7"/></svg>',
 };
 const iconEl = (name) => el('span', { class: 'ico', html: ICON[name] }).firstChild;
@@ -126,6 +127,7 @@ function normTrack(a) {
     duration: a.duration || 0,
     url: a.url || '',
     explicit: Boolean(a.is_explicit),
+    chart: a.audio_chart_info ? { position: a.audio_chart_info.position || 0, state: String(a.audio_chart_info.state || a.audio_chart_info.trend || '') } : null,
     thumb,
     cover: (size) => pickPhoto(thumb, size),
   };
@@ -331,6 +333,21 @@ function loginPrompt(what) {
 
 // --- Отрисовка: треки и карточки -----------------------------------------------------------
 
+// Номер строки; в чарте — место и движение (корона, вверх, вниз, без изменений)
+function rowNumber(track, index) {
+  const chart = track.chart && track.chart.position ? track.chart : null;
+  if (!chart) return el('div', { class: 'row-num', text: String(index + 1) });
+  const st = chart.state.toLowerCase();
+  const trend = /crown|leader|top/.test(st) || (!st && chart.position === 1) ? 'crown'
+    : /up|rais|rise|grow/.test(st) ? 'up'
+      : /down|fall|drop/.test(st) ? 'down'
+        : /new/.test(st) ? 'new'
+          : st ? 'same' : '';
+  return el('div', { class: 'row-num chart' },
+    el('span', { text: String(chart.position) }),
+    trend ? el('i', { class: 'trend ' + trend, title: { crown: 'Лидер чарта', up: 'Поднялся', down: 'Опустился', new: 'Новинка в чарте', same: 'Без изменений' }[trend] }) : null);
+}
+
 function trackRow(track, list, index, { number = false } = {}) {
   const row = el('div', {
     class: 'row' + (player.current && player.current.key === track.key ? ' playing' : ''),
@@ -338,7 +355,7 @@ function trackRow(track, list, index, { number = false } = {}) {
     title: `${track.artist} — ${track.title}`,
     onclick: () => player.playList(list, index),
   },
-  number ? el('div', { class: 'row-num', text: String(index + 1) }) : null,
+  number ? rowNumber(track, index) : null,
   el('div', { class: 'row-cover' },
     el('img', { src: track.cover(135) || null, alt: '', loading: 'lazy', decoding: 'async', width: '46', height: '46' }),
     el('div', { class: 'row-overlay', html: `${ICON.play.replace('<svg', '<svg class="icon-play"')}<span class="eq"><i></i><i></i><i></i></span>` })),
@@ -529,7 +546,8 @@ function mixCard() {
   const card = el('div', { class: 'mix' + (player.mix ? ' on' : ''), id: 'mix-card' },
     el('div', { class: 'mix-text' },
       el('div', { class: 'mix-title', text: 'VK Микс' }),
-      el('div', { class: 'mix-sub', text: auth.loggedIn ? 'Бесконечный поток музыки под ваш вкус' : 'Войдите, чтобы слушать микс под ваш вкус' })),
+      el('div', { class: 'mix-sub', id: 'mix-sub', text: auth.loggedIn ? mixSettings.summary() : 'Войдите, чтобы слушать микс под ваш вкус' }),
+      auth.loggedIn ? el('button', { class: 'mix-tune', onclick: () => mixSettings.open() }, el('span', { class: 'ico', html: ICON.tune }), 'Настроить') : null),
     el('button', {
       class: 'mix-play', title: 'Слушать VK Микс',
       html: `${ICON.play.replace('<svg', '<svg class="icon-play"')}<svg viewBox="0 0 24 24" class="icon-pause"><rect class="fill" x="6" y="5" width="4" height="14" rx="1.2"/><rect class="fill" x="14" y="5" width="4" height="14" rx="1.2"/></svg>`,
@@ -589,6 +607,51 @@ async function viewPublicList(url, eyebrow, title) {
   return [
     pageHead(eyebrow, title, tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
     pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom, { anonymous }),
+  ];
+}
+
+// Чарт VK Музыки. Гостевой каталог ВК отдаёт устаревший чарт, поэтому ищем блок чарта
+// в каталоге аккаунта: блок с раскладкой music_chart_* и его «Показать все».
+async function chartFromAccount() {
+  const isChart = (b) => /chart/.test((b.layout && b.layout.name) || '') && b.data_type === 'music_audios';
+  const scan = async (resp, depth) => {
+    const sections = (resp.catalog && resp.catalog.sections) || (resp.section ? [resp.section] : []);
+    for (const sec of sections) {
+      const block = (sec.blocks || []).find(isChart);
+      if (!block) continue;
+      const showAll = block.meta && block.meta.show_all_info && block.meta.show_all_info.section_id;
+      if (/list/.test(block.layout.name) || !showAll) return parseCatalog(resp, sec);
+      return parseCatalog(await vk('catalog.getSection', { section_id: showAll }));
+    }
+    // вкладки без содержимого (Главная, Обзор…) открываем по одной
+    if (depth > 0) {
+      for (const sec of sections.filter((x) => !(x.blocks || []).length).slice(0, 4)) {
+        try {
+          const found = await scan(await vk('catalog.getSection', { section_id: sec.id }), depth - 1);
+          if (found) return found;
+        } catch { /* следующая вкладка */ }
+      }
+    }
+    return null;
+  };
+  for (const url of ['https://vk.ru/audio?block=chart', 'https://vk.ru/audio?section=explore', 'https://vk.ru/audio']) {
+    try {
+      const found = await scan(await vk('catalog.getAudio', { url, need_blocks: 1 }), 1);
+      if (found && found.blocks.some((b) => b.kind === 'tracks')) return found;
+    } catch { /* следующий адрес */ }
+  }
+  return null;
+}
+
+async function viewChart() {
+  const data = auth.loggedIn ? await chartFromAccount() : null;
+  if (!data) return viewPublicList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт VK Музыки');
+  const block = data.blocks.find((b) => b.kind === 'tracks');
+  const tracks = block.tracks;
+  tracks.forEach((t, i) => { if (!t.chart) t.chart = { position: i + 1, state: '' }; });
+  return [
+    pageHead('Открыть новое', 'Чарт VK Музыки', tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
+    pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom),
   ];
 }
 
@@ -763,7 +826,7 @@ const ROUTES = {
   my: viewMy,
   recs: viewRecs,
   playlists: viewPlaylists,
-  chart: () => viewPublicList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт VK Музыки'),
+  chart: () => viewChart(),
   new: () => viewPublicList('https://vk.ru/audio?block=new_songs', 'Открыть новое', 'Новинки'),
   section: viewSection,
   playlist: viewPlaylist,
@@ -969,9 +1032,23 @@ const player = {
   },
 
   async fetchMix(append) {
-    try {
-      const resp = await vk('audio.getStreamMixAudios', { mix_id: 'common', count: 10, append: append ? 1 : 0 }, { cache: false });
+    const get = async (more) => {
+      const resp = await vk('audio.getStreamMixAudios', { ...mixSettings.params(), count: 10, append: more ? 1 : 0 }, { cache: false });
       return (Array.isArray(resp) ? resp : resp.items || []).map(normTrack);
+    };
+    try {
+      let tracks = await get(append);
+      if (!mixSettings.active()) return tracks;
+      // настройки проверяем и сами: язык и «знакомое/незнакомое» видно по трекам
+      const all = [...tracks];
+      let kept = tracks.filter((t) => mixSettings.accepts(t));
+      for (let i = 0; kept.length < 4 && i < 4; i++) {
+        tracks = await get(true);
+        if (!tracks.length) break;
+        all.push(...tracks);
+        kept = kept.concat(tracks.filter((t) => mixSettings.accepts(t)));
+      }
+      return kept.length ? kept : all;
     } catch (err) {
       return [];
     }
@@ -1278,6 +1355,163 @@ function renderQueue() {
     return row;
   }));
 }
+
+// --- Настройки VK Микса: настроение, узнаваемость, язык -------------------------------------
+// Варианты берём у ВК (audio.getStreamMixSettings), а если он их не отдал — те же, что в приложении ВК.
+const MIX_DEFAULT_GROUPS = [
+  { id: 'mood', title: 'Настроение', big: true, options: [
+    { id: 'joyful', title: 'Радостно', icon: '☀️' },
+    { id: 'sad', title: 'Грустно', icon: '🌙' },
+    { id: 'active', title: 'Активно', icon: '🔥' },
+    { id: 'calm', title: 'Спокойно', icon: '✳️' },
+    { id: 'love', title: 'Любовь', icon: '💗' },
+  ] },
+  { id: 'popularity', title: 'Узнаваемость', options: [
+    { id: 'familiar', title: 'Знакомое', local: 'familiar' },
+    { id: 'unfamiliar', title: 'Незнакомое', local: 'unfamiliar' },
+    { id: 'new', title: 'Новинки' },
+  ] },
+  { id: 'language', title: 'Язык', options: [
+    { id: 'russian', title: 'Русский', local: 'ru' },
+    { id: 'foreign', title: 'Иностранный', local: 'foreign' },
+    { id: 'instrumental', title: 'Без слов' },
+  ] },
+];
+
+const mixSettings = {
+  groups: MIX_DEFAULT_GROUPS,
+  fromVk: false,
+  chosen: (() => { try { return JSON.parse(localStorage.getItem('mixSettings') || '{}'); } catch { return {}; } })(),
+  draft: {},
+
+  active() { return Object.values(this.chosen).some(Boolean); },
+
+  option(groupId, optionId) {
+    const g = this.groups.find((x) => x.id === groupId);
+    return g && g.options.find((o) => o.id === optionId);
+  },
+
+  summary() {
+    const picked = Object.entries(this.chosen).filter(([, v]) => v).map(([g, v]) => (this.option(g, v) || {}).title).filter(Boolean);
+    return picked.length ? picked.join(' · ') : 'Бесконечный поток музыки под ваш вкус';
+  },
+
+  // Параметры запроса микса
+  params() {
+    const params = { mix_id: 'common' };
+    for (const [groupId, optionId] of Object.entries(this.chosen)) {
+      const o = optionId && this.option(groupId, optionId);
+      if (!o) continue;
+      if (o.mixId) params.mix_id = o.mixId;
+      if (o.params) Object.assign(params, o.params);
+      else params[groupId] = o.id;
+    }
+    return params;
+  },
+
+  // Проверка трека по тому, что видно без ВК
+  accepts(t) {
+    const text = `${t.artist} ${t.title}`;
+    const cyr = /[а-яё]/i.test(text);
+    for (const [groupId, optionId] of Object.entries(this.chosen)) {
+      const o = optionId && this.option(groupId, optionId);
+      const local = o && o.local;
+      if (local === 'ru' && !cyr) return false;
+      if (local === 'foreign' && cyr) return false;
+      if (local === 'unfamiliar' && library.has(t)) return false;
+      if (local === 'familiar' && library.loaded && !library.has(t) && !this.knownArtist(t)) return false;
+    }
+    return true;
+  },
+
+  knownArtist(t) {
+    return (t.artists || []).some((a) => libraryArtists.has(a.name.toLowerCase())) || libraryArtists.has(t.artist.toLowerCase());
+  },
+
+  // Разбираем ответ ВК в группы. Формат ответа не документирован — принимаем любые похожие поля.
+  async loadFromVk() {
+    if (this.fromVk || !auth.loggedIn) return;
+    try {
+      const resp = await vk('audio.getStreamMixSettings', {}, { cache: false });
+      const rawGroups = Array.isArray(resp) ? resp : resp.items || resp.settings || resp.groups || resp.blocks || resp.filters || [];
+      const groups = rawGroups.map((g) => {
+        const options = (g.options || g.items || g.values || g.buttons || []).map((o) => ({
+          id: String(o.id ?? o.value ?? o.key ?? o.name ?? ''),
+          title: o.title || o.name || o.text || '',
+          icon: '',
+          image: (o.icon && (o.icon.url || (Array.isArray(o.icon) && o.icon.length && o.icon[o.icon.length - 1].url))) || (o.image && o.image.url) || '',
+          mixId: o.mix_id || '',
+          params: o.params || o.request_params || null,
+        })).filter((o) => o.id && o.title);
+        return { id: String(g.id ?? g.key ?? g.type ?? g.name ?? ''), title: g.title || g.name || '', options };
+      }).filter((g) => g.id && g.options.length);
+      if (!groups.length) return;
+      // свои значки и локальные проверки переносим по названиям
+      for (const g of groups) {
+        const def = MIX_DEFAULT_GROUPS.find((d) => d.title.toLowerCase() === g.title.toLowerCase());
+        if (def) g.big = def.big;
+        for (const o of g.options) {
+          const d = MIX_DEFAULT_GROUPS.flatMap((x) => x.options).find((x) => x.title.toLowerCase() === o.title.toLowerCase());
+          if (d) { o.icon = o.image ? '' : d.icon; o.local = d.local; }
+        }
+      }
+      this.groups = groups;
+      this.fromVk = true;
+      for (const k of Object.keys(this.chosen)) if (!this.option(k, this.chosen[k])) delete this.chosen[k];
+    } catch {
+      /* остаются варианты по умолчанию */
+    }
+  },
+
+  async open() {
+    this.draft = { ...this.chosen };
+    await this.loadFromVk();
+    let panel = $('#mix-settings');
+    if (panel) panel.remove();
+    panel = el('div', { class: 'mix-settings-backdrop', id: 'mix-settings', onclick: (e) => { if (e.target === panel) this.close(); } },
+      el('div', { class: 'mix-settings', role: 'dialog', 'aria-label': 'Настроить VK Микс' },
+        el('div', { class: 'ms-head' },
+          el('div', { class: 'ms-title', text: 'Настроить VK Микс' }),
+          el('button', { class: 'ms-close', title: 'Закрыть', html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>', onclick: () => this.close() })),
+        this.groups.map((g) => el('div', { class: 'ms-group' },
+          el('div', { class: 'ms-label', text: g.title }),
+          el('div', { class: 'ms-options' + (g.big ? ' big' : '') }, g.options.map((o) => el('button', {
+            class: 'ms-opt' + (this.draft[g.id] === o.id ? ' on' : ''),
+            dataset: { group: g.id, opt: o.id },
+            onclick: () => { this.draft[g.id] = this.draft[g.id] === o.id ? '' : o.id; this.paint(); },
+          },
+          g.big ? el('span', { class: 'ms-icon' }, o.image ? el('img', { src: o.image, alt: '' }) : o.icon || '♪') : null,
+          el('span', { class: 'ms-text', text: o.title })))))),
+        el('div', { class: 'ms-foot' },
+          el('button', { class: 'btn ghost', text: 'Сбросить', onclick: () => { this.draft = {}; this.paint(); } }),
+          el('button', { class: 'btn primary', id: 'ms-apply', text: 'Применить', onclick: () => this.apply() }))));
+    document.body.append(panel);
+    this.paint();
+  },
+
+  paint() {
+    $$('#mix-settings .ms-opt').forEach((b) => b.classList.toggle('on', this.draft[b.dataset.group] === b.dataset.opt));
+    const same = JSON.stringify(this.clean(this.draft)) === JSON.stringify(this.clean(this.chosen));
+    const apply = $('#ms-apply');
+    if (apply) apply.disabled = same;
+  },
+
+  clean(obj) { return Object.fromEntries(Object.entries(obj).filter(([, v]) => v).sort()); },
+
+  close() { const p = $('#mix-settings'); if (p) p.remove(); },
+
+  apply() {
+    this.chosen = this.clean(this.draft);
+    try { localStorage.setItem('mixSettings', JSON.stringify(this.chosen)); } catch { /* не страшно */ }
+    this.close();
+    const sub = $('#mix-sub');
+    if (sub) sub.textContent = this.summary();
+    player.startMix(); // сразу слушаем микс с новыми настройками
+  },
+};
+
+// Артисты из «Моих аудио» — чтобы понимать, что пользователю знакомо
+const libraryArtists = new Set();
 
 function renderMixState() {
   const card = $('#mix-card');
@@ -1680,6 +1914,7 @@ const library = {
 
   async load() {
     this.keys.clear();
+    libraryArtists.clear();
     this.loaded = false;
     if (!auth.loggedIn || !auth.me) return renderAddState();
     // список «Моих аудио» нужен только чтобы знать, что уже добавлено — грузим порциями в фоне
@@ -1688,7 +1923,11 @@ const library = {
       for (let guard = 0; guard < 60; guard++) {
         const resp = await vk('audio.get', { owner_id: auth.me.id, count: MY_PAGE, offset });
         const items = resp.items || [];
-        items.forEach((a) => this.keys.add(`${a.owner_id}_${a.id}`));
+        items.forEach((a) => {
+          this.keys.add(`${a.owner_id}_${a.id}`);
+          (a.main_artists || []).forEach((x) => x.name && libraryArtists.add(x.name.toLowerCase()));
+          if (a.artist) libraryArtists.add(a.artist.toLowerCase());
+        });
         offset += items.length;
         renderAddState();
         if (!items.length || offset >= (resp.count || 0)) break;
@@ -2113,7 +2352,8 @@ document.addEventListener('keydown', (e) => {
   const typing = e.target.closest('input, textarea');
   if (e.key === 'F11') { e.preventDefault(); setImmersive(!document.body.classList.contains('immersive')); return; }
   if (e.key === 'Escape') {
-    if (document.body.classList.contains('immersive')) setImmersive(false);
+    if ($('#mix-settings')) mixSettings.close();
+    else if (document.body.classList.contains('immersive')) setImmersive(false);
     else if (!$('#eq-panel').hidden) $('#eq-panel').hidden = true;
     else if (!fs.hidden) sheet.hide();
     else if (!loginModal.hidden) closeLogin(true);
