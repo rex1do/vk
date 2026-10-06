@@ -34,6 +34,13 @@ const ICON = {
   user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>',
   search: '<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg>',
   login: '<svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></svg>',
+  more: '<svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.7" class="fill"/><circle cx="12" cy="12" r="1.7" class="fill"/><circle cx="18.5" cy="12" r="1.7" class="fill"/></svg>',
+  next: '<svg viewBox="0 0 24 24"><path d="M4 6h11M4 11h11M4 16h7"/><path class="fill" d="M15.5 13.5l5 3-5 3z"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+  minus: '<svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg>',
+  download: '<svg viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24"><path class="fill" d="M11 3q1 7 8 8q-7 1-8 8q-1-7-8-8q7-1 8-8z"/></svg>',
+  quote: '<svg viewBox="0 0 24 24"><path d="M5 6h14M5 10.5h10M5 15h12M5 19.5h7"/></svg>',
 };
 const iconEl = (name) => el('span', { class: 'ico', html: ICON[name] }).firstChild;
 
@@ -162,7 +169,7 @@ function parseCatalog(resp, explicitSection = null) {
   const idOf = (raw) => String(raw).split('_').slice(0, 2).join('_');
   for (const b of section.blocks || []) {
     const layout = (b.layout && b.layout.name) || '';
-    if (layout === 'header') {
+    if (layout.startsWith('header')) {
       header = { title: (b.layout && b.layout.title) || b.title, action: (b.actions || []).find((a) => a.section_id) };
       continue;
     }
@@ -338,7 +345,12 @@ function trackRow(track, list, index, { number = false } = {}) {
   el('div', { class: 'row-text' },
     el('div', { class: 'row-title' }, track.title + (track.subtitle ? ` (${track.subtitle})` : ''), track.explicit ? el('span', { class: 'explicit', text: 'E' }) : null),
     artistLine(track, 'row-artist')),
-  el('div', { class: 'row-dur', text: fmt(track.duration) }));
+  el('div', { class: 'row-dur', text: fmt(track.duration) }),
+  el('button', {
+    class: 'row-more', title: 'Ещё', html: ICON.more,
+    onclick: (e) => { e.stopPropagation(); openTrackMenu(track, e.currentTarget); },
+  }));
+  row.addEventListener('contextmenu', (e) => { e.preventDefault(); openTrackMenu(track, { x: e.clientX, y: e.clientY }); });
   return row;
 }
 
@@ -424,7 +436,7 @@ function playlistCard(p) {
 function sectionHead(title, action) {
   return el('div', { class: 'section-head' },
     el('h2', { class: 'section-title', text: title || '' }),
-    action ? el('button', { class: 'more', text: 'Все', onclick: () => router.go('section', { id: action.section_id, title }) }) : null);
+    action ? el('button', { class: 'more', text: 'Все', onclick: () => router.go('section', { id: action.section_id, title, url: action.action && action.action.url }) }) : null);
 }
 
 function pageHead(eyebrow, title, sub, actions = []) {
@@ -486,16 +498,17 @@ content.addEventListener('scroll', () => {
   }
 });
 
-function pagedTrackList(tracks, sectionId, nextFrom) {
+function pagedTrackList(tracks, sectionId, nextFrom, { anonymous = false } = {}) {
   const list = trackList(tracks);
   const more = async (from) => {
     if (!from || !sectionId) return;
     try {
-      const resp = await vk('catalog.getSection', { section_id: sectionId, start_from: from });
+      const resp = await vk('catalog.getSection', { section_id: sectionId, start_from: from }, { anonymous });
       const parsed = parseCatalog(resp);
       const extra = parsed.blocks.filter((b) => b.kind === 'tracks').flatMap((b) => b.tracks);
       const seen = new Set(tracks.map((t) => t.key));
       const fresh = extra.filter((t) => !seen.has(t.key));
+      if (anonymous) fresh.forEach((t) => { t.url = ''; });
       if (!fresh.length) return;
       const start = tracks.length;
       tracks.push(...fresh);
@@ -537,6 +550,14 @@ async function viewHome() {
   ];
 }
 
+async function viewSimilar(track) {
+  if (!auth.loggedIn) return loginPrompt('Похожие треки');
+  const resp = await vk('audio.getRecommendations', { target_audio: track.key, count: 100 });
+  const tracks = (resp.items || resp || []).map(normTrack);
+  if (!tracks.length) return [pageHead('Похожие', track.title), el('div', { class: 'state' }, el('div', { class: 'state-title', text: 'ВКонтакте не нашёл похожих' }))];
+  return [pageHead(`Похожие на «${track.title}»`, track.artist, tracksWord(tracks.length), playButtons(() => tracks)), trackList(tracks)];
+}
+
 async function viewArtist({ id, name }) {
   const resp = await vk('catalog.getAudioArtist', { artist_id: id, need_blocks: 1 });
   const data = parseCatalog(resp);
@@ -556,6 +577,21 @@ async function viewArtist({ id, name }) {
   ];
 }
 
+// Чарт и новинки одинаковы для всех — берём их из публичного каталога ВК (как у гостя),
+// а полные версии треков плеер получает по аккаунту
+async function viewPublicList(url, eyebrow, title) {
+  const anonymous = auth.loggedIn;
+  const data = parseCatalog(await vk('catalog.getAudio', { url, need_blocks: 1 }, { anonymous }));
+  const block = data.blocks.find((b) => b.kind === 'tracks');
+  if (!block) throw new Error('ВКонтакте не отдал этот раздел');
+  const tracks = block.tracks;
+  if (anonymous) tracks.forEach((t) => { t.url = ''; }); // в гостевом каталоге — только отрывки
+  return [
+    pageHead(eyebrow, title, tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
+    pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom, { anonymous }),
+  ];
+}
+
 async function viewCatalogList(url, eyebrow, title, titleRe) {
   const data = await catalogByUrl(url, titleRe);
   if (!data) throw new Error('ВКонтакте не отдал этот раздел');
@@ -568,8 +604,24 @@ async function viewCatalogList(url, eyebrow, title, titleRe) {
   ];
 }
 
-async function viewSection({ id, title }) {
-  const data = parseCatalog(await vk('catalog.getSection', { section_id: id }));
+// Раздел «Показать все». Некоторые разделы (например, все релизы артиста) ВК не отдаёт
+// по ID — тогда открываем их по адресу страницы, как делает сам сайт.
+async function loadSection({ id, url }) {
+  try {
+    return parseCatalog(await vk('catalog.getSection', { section_id: id }));
+  } catch (err) {
+    if (!url) throw err;
+    const artist = /\/artist\/([^/?#]+)/.exec(url);
+    const resp = artist
+      ? await vk('catalog.getAudioArtist', { artist_id: artist[1], url, need_blocks: 1 })
+      : await vk('catalog.getAudio', { url, need_blocks: 1 });
+    const sections = (resp.catalog && resp.catalog.sections) || [];
+    return parseCatalog(resp, sections.find((s) => targetOf(s.url) === targetOf(url)) || null);
+  }
+}
+
+async function viewSection({ id, title, url }) {
+  const data = await loadSection({ id, url });
   const name = title || data.title;
   const trackBlocks = data.blocks.filter((b) => b.kind === 'tracks');
   if (data.blocks.length === 1 && trackBlocks.length === 1) {
@@ -583,19 +635,36 @@ async function viewSection({ id, title }) {
   return [pageHead('Подборка', name), renderBlocks(data.blocks)];
 }
 
+const MY_PAGE = 200;
 async function viewMy() {
   if (!auth.loggedIn) return loginPrompt('Моя музыка');
   const uid = auth.me && auth.me.id;
-  let tracks = [];
-  try {
-    const resp = await vk('audio.get', { owner_id: uid, count: 6000 });
-    tracks = (resp.items || []).map(normTrack);
-  } catch {
-    const data = parseCatalog(await vk('catalog.getAudio', { url: `https://vk.ru/audios${uid}`, need_blocks: 1 }));
-    tracks = data.blocks.filter((b) => b.kind === 'tracks').flatMap((b) => b.tracks);
-  }
-  if (!tracks.length) return [pageHead('Медиатека', 'Моя музыка'), el('div', { class: 'state' }, el('div', { class: 'state-title', text: 'Здесь пока пусто' }), 'Добавляйте треки во ВКонтакте — они появятся тут.')];
-  return [pageHead('Медиатека', 'Моя музыка', tracksWord(tracks.length), playButtons(() => tracks)), trackList(tracks)];
+  const first = await vk('audio.get', { owner_id: uid, count: MY_PAGE, offset: 0 });
+  const total = first.count || 0;
+  const tracks = (first.items || []).map(normTrack);
+  if (!tracks.length) return [pageHead('Медиатека', 'Моя музыка'), el('div', { class: 'state' }, el('div', { class: 'state-title', text: 'Здесь пока пусто' }), 'Добавляйте треки — они появятся тут.')];
+  const list = trackList(tracks);
+  // остальное подгружается по мере прокрутки
+  let offset = (first.items || []).length;
+  const more = async () => {
+    if (offset >= total) return;
+    try {
+      const resp = await vk('audio.get', { owner_id: uid, count: MY_PAGE, offset });
+      const page = (resp.items || []).map(normTrack);
+      if (!page.length) return;
+      offset += page.length;
+      const start = tracks.length;
+      tracks.push(...page);
+      page.forEach((t, i) => list.append(trackRow(t, tracks, start + i, { number: true })));
+      if (offset < total) loadMore = more;
+    } catch {
+      loadMore = more; // попробуем ещё раз при следующей прокрутке
+    }
+  };
+  if (offset < total) loadMore = more;
+  // «Слушать всё» — сначала догружаем весь список
+  const all = async () => { while (offset < total) { const before = offset; await more(); if (offset === before) break; } return tracks; };
+  return [pageHead('Медиатека', 'Моя музыка', tracksWord(total), playButtons(all)), list];
 }
 
 async function viewRecs() {
@@ -694,12 +763,13 @@ const ROUTES = {
   my: viewMy,
   recs: viewRecs,
   playlists: viewPlaylists,
-  chart: () => viewCatalogList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт', /чарт|chart/i),
-  new: () => viewCatalogList('https://vk.ru/audio?block=new_songs', 'Открыть новое', 'Новинки', /новинки|новые треки|new releases|new songs/i),
+  chart: () => viewPublicList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт VK Музыки'),
+  new: () => viewPublicList('https://vk.ru/audio?block=new_songs', 'Открыть новое', 'Новинки'),
   section: viewSection,
   playlist: viewPlaylist,
   search: viewSearch,
   artist: viewArtist,
+  similar: viewSimilar,
 };
 
 const router = {
@@ -981,17 +1051,25 @@ const player = {
       }
     }
     if (id !== this.loadId) return;
-    // режим «без цензуры»: ищем оригинальную версию (не дольше 2,5 с, иначе играем как есть)
+    // режим «без цензуры»: если версия уже проверена — сразу играем её;
+    // иначе играем лицензию, а проверка идёт в фоне и подменит звук на той же секунде
     track.substitute = null;
     let playUrl = track.url;
-    if (uncensor.enabled && auth.loggedIn) {
-      const alt = await Promise.race([uncensor.find(track), new Promise((r) => setTimeout(() => r(null), 2500))]);
+    if (uncensor.applies(track) && track.key in uncensor.memo && uncensor.memo[track.key]) {
+      const alt = uncensor.memo[track.key];
+      const altUrl = await uncensor.urlOf(alt);
       if (id !== this.loadId) return;
-      if (alt) {
-        const altUrl = await uncensor.resolve(alt);
-        if (id !== this.loadId) return;
-        if (altUrl) { track.substitute = { ...alt, url: altUrl }; playUrl = altUrl; }
-      }
+      if (altUrl) { track.substitute = { ...alt, url: altUrl }; playUrl = altUrl; }
+    } else if (uncensor.applies(track)) {
+      uncensor.analyze(track).then(async (alt) => {
+        if (!alt || id !== this.loadId) return;
+        const altUrl = await uncensor.urlOf(alt);
+        if (!altUrl || id !== this.loadId) return;
+        track.substitute = { ...alt, url: altUrl };
+        renderSubstitute();
+        this.attach(altUrl, id, track, false, audio.currentTime);
+        toast('Включена версия без цензуры');
+      });
     }
     renderSubstitute();
     if (!playUrl) {
@@ -1001,10 +1079,12 @@ const player = {
     this.attach(playUrl, id, track);
   },
 
-  attach(url, id, track, retried = false) {
+  attach(url, id, track, retried = false, startAt = 0) {
+    const wasPaused = audio.paused && startAt > 0;
     this.destroyHls();
     if (/\.m3u8/.test(url) && window.Hls && Hls.isSupported()) {
       const hls = new Hls({
+        startPosition: startAt > 0 ? startAt : -1,
         enableWorker: true,
         startFragPrefetch: true,
         maxBufferLength: 30,
@@ -1032,8 +1112,9 @@ const player = {
       hls.attachMedia(audio);
     } else {
       audio.src = url;
+      if (startAt > 0) audio.addEventListener('loadedmetadata', () => { audio.currentTime = startAt; }, { once: true });
     }
-    audio.play().catch(() => {});
+    if (!wasPaused) audio.play().catch(() => {});
   },
 
   destroyHls() {
@@ -1086,6 +1167,15 @@ const player = {
     else audio.pause();
   },
 
+  playNext(track) {
+    if (!this.current || !this.queue.length) { this.playList([track], 0); return; }
+    const index = this.queue.length;
+    this.queue = this.queue.concat([track]); // копия: не меняем список на экране
+    this.order.splice(this.pos + 1, 0, index);
+    renderQueue();
+    toast('Будет играть следующим');
+  },
+
   jumpTo(orderPos) {
     this.pos = orderPos;
     this.load();
@@ -1108,6 +1198,7 @@ let preparedKey = null;
 async function prepareNext() {
   const nextPos = player.pos + 1 < player.order.length ? player.pos + 1 : (player.repeat === 'all' ? 0 : -1);
   const next = nextPos >= 0 ? player.queue[player.order[nextPos]] : null;
+  if (next && uncensor.applies(next) && !(next.key in uncensor.memo)) uncensor.analyze(next);
   if (!next || next.url || preparedKey === next.key) return;
   preparedKey = next.key;
   try {
@@ -1268,6 +1359,7 @@ document.addEventListener('click', (e) => {
   else if (act === 'shuffle') player.setShuffle(!player.shuffle);
   else if (act === 'repeat') player.cycleRepeat();
   else if (act === 'add') library.toggle(player.current);
+  else if (act === 'menu') openTrackMenu(player.current, btn);
   else if (act === 'download') downloadTrack(player.current);
 });
 bridge.onMedia((action) => {
@@ -1345,11 +1437,19 @@ const lyrics = {
         parsed = null;
       }
     }
+    // у ВК текста нет — ищем на Genius
+    if (!parsed && player.current && player.current.key === t.key) {
+      lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Ищем текст на Genius…' }));
+      const genius = await bridge.geniusLyrics({ artist: t.artist, title: t.title }).catch(() => null);
+      if (genius && genius.lines && genius.lines.length) {
+        parsed = { synced: false, lines: genius.lines.map((text) => ({ time: 0, text })), source: 'Genius' };
+      }
+    }
     this.loading = false;
     if (!player.current || player.current.key !== t.key) { this.key = null; return this.load(); }
     if (!parsed) {
       this.lines = [];
-      lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: auth.loggedIn ? 'Для этого трека нет текста' : 'Тексты песен доступны после входа' }));
+      lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Текст для этого трека не нашёлся' }));
       return;
     }
     this.synced = parsed.synced;
@@ -1363,6 +1463,7 @@ const lyrics = {
       }),
     }));
     lyricsBox.replaceChildren(...this.lines.map((l) => l.node));
+    if (parsed.source) lyricsBox.append(el('div', { class: 'lyric-source', text: `Текст: ${parsed.source}` }));
     lyricsBox.scrollTop = 0;
     this.update(true);
   },
@@ -1529,6 +1630,48 @@ $('#bar-track').addEventListener('click', (e) => { if (!e.target.closest('.artis
 $('#expand').addEventListener('click', () => sheet.show());
 $('#fs-close').addEventListener('click', () => sheet.hide());
 
+// --- Меню трека (⋯ и правый клик) ---------------------------------------------------------
+
+let openMenuEl = null;
+function closeMenu() {
+  if (openMenuEl) { openMenuEl.remove(); openMenuEl = null; }
+}
+function openTrackMenu(track, anchor) {
+  closeMenu();
+  if (!track) return;
+  const inLibrary = library.has(track);
+  const items = [
+    ['Играть следующим', ICON.next, () => player.playNext(track)],
+    [inLibrary ? 'Удалить из Моих аудио' : 'Добавить в Мои аудио', inLibrary ? ICON.minus : ICON.plus, () => library.toggle(track)],
+    ['Скачать', ICON.download, () => downloadTrack(track)],
+    ['Найти похожие', ICON.sparkle, () => router.go('similar', track)],
+    ['Перейти к артисту', ICON.user, () => (track.artists.length ? openArtist(track.artists[0]) : openArtistByName(track.artist))],
+    ['Текст на Genius', ICON.quote, () => bridge.geniusOpen({ artist: track.artist, title: track.title })],
+  ];
+  const menu = el('div', { class: 'menu', role: 'menu' },
+    el('div', { class: 'menu-head' }, el('div', { class: 'menu-title', text: track.title }), el('div', { class: 'menu-sub', text: track.artist })),
+    items.map(([label, icon, action]) => el('button', {
+      class: 'menu-item', role: 'menuitem',
+      onclick: () => { closeMenu(); action(); },
+    }, el('span', { class: 'menu-ico', html: icon }), label)));
+  document.body.append(menu);
+  // рядом с кнопкой или курсором, но внутри окна
+  const r = anchor instanceof Element ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  let x = (anchor instanceof Element ? r.right - mw : r.left);
+  let y = r.bottom + 6;
+  if (y + mh > window.innerHeight - 8) y = r.top - mh - 6;
+  x = Math.max(8, Math.min(x, window.innerWidth - mw - 8));
+  y = Math.max(8, y);
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  menu.style.transformOrigin = `${anchor instanceof Element ? '100%' : '0'} ${y < r.top ? '100%' : '0'}`;
+  openMenuEl = menu;
+}
+document.addEventListener('pointerdown', (e) => { if (openMenuEl && !e.target.closest('.menu')) closeMenu(); }, true);
+window.addEventListener('blur', closeMenu);
+content.addEventListener('scroll', closeMenu, { passive: true });
+
 // --- Мои аудио: добавить / убрать -----------------------------------------------------------
 
 const library = {
@@ -1539,9 +1682,17 @@ const library = {
     this.keys.clear();
     this.loaded = false;
     if (!auth.loggedIn || !auth.me) return renderAddState();
+    // список «Моих аудио» нужен только чтобы знать, что уже добавлено — грузим порциями в фоне
     try {
-      const resp = await vk('audio.get', { owner_id: auth.me.id, count: 6000 });
-      (resp.items || []).forEach((a) => this.keys.add(`${a.owner_id}_${a.id}`));
+      let offset = 0;
+      for (let guard = 0; guard < 60; guard++) {
+        const resp = await vk('audio.get', { owner_id: auth.me.id, count: MY_PAGE, offset });
+        const items = resp.items || [];
+        items.forEach((a) => this.keys.add(`${a.owner_id}_${a.id}`));
+        offset += items.length;
+        renderAddState();
+        if (!items.length || offset >= (resp.count || 0)) break;
+      }
       this.loaded = true;
     } catch {
       /* не страшно — кнопка просто покажет «добавить» */
@@ -1722,18 +1873,21 @@ document.addEventListener('pointerdown', (e) => {
 });
 
 // --- Подмена зацензуренных треков оригиналом ---------------------------------------------
-// Ищем во ВКонтакте тот же трек без цензуры: совпадают исполнитель, название и длительность,
-// и это точно не ремикс / slowed / cover / live и т.п. Предпочтение — версии с отметкой 18+,
-// затем загруженным пользователями копиям релиза.
+// 1) Ищем во ВКонтакте ту же песню: тот же исполнитель, то же название (приписки в скобках
+//    вроде «(Nagasaki's.47)» допускаются), та же длительность ±4 с, и это не ремикс/slowed/cover/live.
+// 2) Проверяем по звуку (shell/compare.js): кандидат должен совпадать с лицензионной версией
+//    везде, кроме коротких мест, где в лицензии слова заглушены. Перезалитые зацензуренные
+//    копии (совпадают полностью) и другие записи (не совпадают) пропускаются.
 
 const NOT_ORIGINAL = [
   'remix', 'rmx', 'ремикс', 'slowed', 'slow', 'sped', 'speed up', 'speedup', 'nightcore', 'reverb', 'реверб',
   'cover', 'кавер', 'karaoke', 'караоке', 'instrumental', 'инструментал', 'минус', 'minus', 'live', 'лайв',
   'концерт', 'acoustic', 'акустика', 'edit', 'mashup', 'мэшап', 'bass boost', 'bass boosted', '8d', 'phonk',
-  'version', 'версия', 'demo', 'демо', 'radio', 'tiktok', 'tik tok', 'extended', 'ver', 'перепев', 'пародия',
-  'parody', 'mix', 'vip', 'bootleg', 'flip', 'rework', 'snippet', 'сниппет', 'нарезка', 'clean', 'censored',
+  'demo', 'демо', 'radio', 'tiktok', 'tik tok', 'extended', 'перепев', 'пародия', 'parody', 'mix', 'vip',
+  'bootleg', 'flip', 'rework', 'snippet', 'сниппет', 'нарезка', 'clean', 'censored', 'цензура', 'cut', 'short',
 ];
 const notOriginalRe = new RegExp(`(?<![\\p{L}\\p{N}])(${NOT_ORIGINAL.map((w) => w.replace(/ /g, '\\s*')).join('|')})(?![\\p{L}\\p{N}])`, 'iu');
+const EVIDENCE_RE = /(?<![\p{L}\p{N}])(uncensored|explicit|без цензуры|нецензур|18\+|original|оригинал|album version)(?![\p{L}\p{N}])/iu;
 
 function normText(text) {
   return String(text || '').toLowerCase().replace(/ё/g, 'е')
@@ -1741,6 +1895,8 @@ function normText(text) {
     .replace(/\s(feat|ft)\.?\s.*$/g, ' ')
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
+// название без любых приписок в скобках: «Куни (Nagasaki's.47)» → «куни»
+const baseTitle = (title) => normText(String(title || '').replace(/\([^)]*\)|\[[^\]]*\]/g, ' '));
 function similar(a, b) {
   if (a === b) return 1;
   if (!a || !b) return 0;
@@ -1756,63 +1912,106 @@ function similar(a, b) {
 
 const uncensor = {
   enabled: localStorage.getItem('uncensor') !== '0', // включено по умолчанию
-  memo: JSON.parse(localStorage.getItem('uncensorMemo') || '{}'),
+  memo: JSON.parse(localStorage.getItem('uncensorMemo2') || '{}'), // вердикты: ключ трека → версия или null
+  jobs: new Map(), // идущие проверки
+  decodeCtx: null,
 
   remember(key, value) {
     this.memo[key] = value;
     const keys = Object.keys(this.memo);
-    if (keys.length > 800) keys.slice(0, keys.length - 800).forEach((k) => delete this.memo[k]);
-    localStorage.setItem('uncensorMemo', JSON.stringify(this.memo));
+    if (keys.length > 1500) keys.slice(0, keys.length - 1500).forEach((k) => delete this.memo[k]);
+    localStorage.setItem('uncensorMemo2', JSON.stringify(this.memo));
+  },
+
+  // нужно ли вообще проверять этот трек
+  applies(track) {
+    return this.enabled && auth.loggedIn && track && !track.explicit && track.isLicensed && track.duration > 30;
   },
 
   isCandidate(orig, c) {
     if (c.key === orig.key) return false;
-    // не ремикс и т.п. (если сам оригинал не такой)
     const origTag = notOriginalRe.test(`${orig.title} ${orig.subtitle}`);
     if (!origTag && notOriginalRe.test(`${c.title} ${c.subtitle}`)) return false;
-    // та же длительность — значит, та же запись, а не другая версия
-    if (!orig.duration || Math.abs(c.duration - orig.duration) > 3) return false;
-    // то же название (допускаем мелкие отличия в написании)
-    if (similar(normText(c.title), normText(orig.title)) < 0.85) return false;
-    // тот же исполнитель
+    if (Math.abs(c.duration - orig.duration) > 4) return false;
+    const a = baseTitle(orig.title), b = baseTitle(c.title);
+    if (!(b === a || b.startsWith(a + ' ') || similar(a, b) >= 0.85)) return false;
     const mainArtist = normText((orig.artists[0] && orig.artists[0].name) || orig.artist.split(/,|&/)[0]);
     const cArtist = normText(c.artist);
     if (!cArtist.includes(mainArtist) && similar(cArtist, normText(orig.artist)) < 0.8) return false;
-    // берём только версии с отметкой 18+ или загруженные пользователями копии
-    return c.explicit || c.owner_id > 0;
+    // другая лицензионная версия без отметки 18+ — почти наверняка та же цензура
+    if (c.owner_id < 0 && !c.explicit) return false;
+    return true;
   },
 
-  async find(track) {
-    if (!this.enabled || !auth.loggedIn || !track || track.explicit || !track.isLicensed) return null;
-    if (track.key in this.memo) {
-      const hit = this.memo[track.key];
-      if (!hit) return null;
-      return { ...hit, url: '' };
+  async candidates(track) {
+    const artist = (track.artists[0] && track.artists[0].name) || track.artist.split(/,|&/)[0];
+    const queries = [`${artist} ${baseTitle(track.title) || track.title}`, `${artist} ${track.title}`];
+    const seen = new Map();
+    for (const q of [...new Set(queries)]) {
+      try {
+        const resp = await vk('audio.search', { q, count: 60, auto_complete: 0 }, { cache: false });
+        (resp.items || []).map(normTrack).forEach((t) => seen.set(t.key, t));
+      } catch {
+        /* следующий запрос */
+      }
     }
-    const query = `${(track.artists[0] && track.artists[0].name) || track.artist.split(/,|&/)[0]} ${track.title}`;
-    let items = [];
-    try {
-      const resp = await vk('audio.search', { q: query, count: 40, auto_complete: 0 }, { cache: false });
-      items = (resp.items || []).map(normTrack);
-    } catch {
-      return null;
-    }
-    const candidates = items.filter((c) => this.isCandidate(track, c))
-      .sort((a, b) => (b.explicit - a.explicit) || ((b.owner_id < 0) - (a.owner_id < 0)) || (Math.abs(a.duration - track.duration) - Math.abs(b.duration - track.duration)));
-    const best = candidates[0] || null;
-    this.remember(track.key, best ? { key: best.key, fullId: best.fullId, title: best.title, artist: best.artist } : null);
-    return best;
+    const score = (c) => (c.explicit ? 4 : 0) + (EVIDENCE_RE.test(`${c.title} ${c.subtitle}`) ? 2 : 0)
+      + (normText(c.title) !== normText(track.title) ? 1 : 0) - Math.abs(c.duration - track.duration) * 0.1;
+    return [...seen.values()].filter((c) => this.isCandidate(track, c)).sort((a, b) => score(b) - score(a)).slice(0, 3);
   },
 
-  // ссылка на найденную версию (кэш хранит только ID — ссылки ВК живут недолго)
-  async resolve(alt) {
-    if (alt.url) return alt.url;
+  async urlOf(t) {
+    if (t.url) return t.url;
     try {
-      const [fresh] = await vk('audio.getById', { audios: alt.fullId }, { cache: false });
+      const [fresh] = await vk('audio.getById', { audios: t.fullId }, { cache: false });
       return (fresh && fresh.url) || '';
     } catch {
       return '';
     }
+  },
+
+  // карта громкости трека: скачиваем звук, декодируем в 8 кГц (экономно) и считаем уровни
+  async envelope(url) {
+    const res = await bridge.audioData(url);
+    if (!res.ok) throw new Error(res.error);
+    if (!this.decodeCtx) this.decodeCtx = new OfflineAudioContext(1, 1, 8000);
+    const bytes = res.data;
+    const buffer = await this.decodeCtx.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    return envelopeFromBuffer(buffer);
+  },
+
+  // Полная проверка трека. Результат запоминается.
+  analyze(track) {
+    if (!this.applies(track)) return Promise.resolve(null);
+    if (track.key in this.memo) return Promise.resolve(this.memo[track.key]);
+    if (this.jobs.has(track.key)) return this.jobs.get(track.key);
+    const job = (async () => {
+      const list = await this.candidates(track);
+      if (!list.length) { this.remember(track.key, null); return null; }
+      const origUrl = await this.urlOf(track);
+      if (!origUrl) return null;
+      const origEnv = await this.envelope(origUrl);
+      for (const c of list) {
+        const url = await this.urlOf(c);
+        if (!url) continue;
+        let env;
+        try {
+          env = await this.envelope(url);
+        } catch {
+          continue;
+        }
+        const result = compareEnvelopes(origEnv, env);
+        if (result.verdict === 'uncensored') {
+          const found = { key: c.key, fullId: c.fullId, title: c.title, artist: c.artist };
+          this.remember(track.key, found);
+          return found;
+        }
+      }
+      this.remember(track.key, null);
+      return null;
+    })().catch(() => null).finally(() => this.jobs.delete(track.key));
+    this.jobs.set(track.key, job);
+    return job;
   },
 };
 

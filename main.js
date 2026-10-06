@@ -9,7 +9,7 @@
 //  Неофициальных клиентов и чужих токенов (Kate Mobile и т.п.) нет — аккаунт в безопасности.
 
 const {
-  app, BaseWindow, Menu, Tray, WebContentsView, dialog, ipcMain, nativeImage, nativeTheme, net, screen, session, shell,
+  app, BaseWindow, BrowserWindow, Menu, Tray, WebContentsView, dialog, ipcMain, nativeImage, nativeTheme, net, screen, session, shell,
 } = require('electron');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -305,6 +305,35 @@ function id3Tag({ title, artist, album }, cover) {
   return Buffer.concat([header, content]);
 }
 
+// Звук трека целиком (MP3/AAC без контейнера): для скачивания и для сравнения версий
+async function fetchAudioData(url, onProgress = () => {}) {
+  if (!/\.m3u8/.test(url)) return fetchBuffer(url);
+  const segments = await hlsSegments(url);
+  const keys = new Map();
+  const parts = new Array(segments.length);
+  let done = 0;
+  let next = 0;
+  const worker = async () => {
+    while (next < segments.length) {
+      const index = next++;
+      const seg = segments[index];
+      let data = await fetchBuffer(seg.url);
+      if (seg.key) {
+        if (!keys.has(seg.key.uri)) keys.set(seg.key.uri, fetchBuffer(seg.key.uri));
+        const keyBytes = await keys.get(seg.key.uri);
+        const iv = seg.key.iv || Buffer.from(seg.seq.toString(16).padStart(32, '0'), 'hex');
+        const decipher = crypto.createDecipheriv('aes-128-cbc', keyBytes, iv);
+        data = Buffer.concat([decipher.update(data), decipher.final()]);
+      }
+      parts[index] = demuxTs(data);
+      done += 1;
+      onProgress(done / segments.length);
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return Buffer.concat(parts);
+}
+
 async function downloadTrack(info) {
   const safeName = `${info.artist} - ${info.title}`.replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 150) || 'track';
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
@@ -316,35 +345,7 @@ async function downloadTrack(info) {
   const progress = (p) => sendToShell('download-progress', { key: info.key, progress: p });
   progress(0);
 
-  let audioData;
-  if (/\.m3u8/.test(info.url)) {
-    const segments = await hlsSegments(info.url);
-    const keys = new Map();
-    const parts = new Array(segments.length);
-    let done = 0;
-    let next = 0;
-    const worker = async () => {
-      while (next < segments.length) {
-        const index = next++;
-        const seg = segments[index];
-        let data = await fetchBuffer(seg.url);
-        if (seg.key) {
-          if (!keys.has(seg.key.uri)) keys.set(seg.key.uri, fetchBuffer(seg.key.uri));
-          const keyBytes = await keys.get(seg.key.uri);
-          const iv = seg.key.iv || Buffer.from(seg.seq.toString(16).padStart(32, '0'), 'hex');
-          const decipher = crypto.createDecipheriv('aes-128-cbc', keyBytes, iv);
-          data = Buffer.concat([decipher.update(data), decipher.final()]);
-        }
-        parts[index] = demuxTs(data);
-        done += 1;
-        progress(done / segments.length);
-      }
-    };
-    await Promise.all(Array.from({ length: 6 }, worker));
-    audioData = Buffer.concat(parts);
-  } else {
-    audioData = await fetchBuffer(info.url);
-  }
+  const audioData = await fetchAudioData(info.url, progress);
 
   let target = filePath;
   // в редких случаях звук внутри — AAC, а не MP3: сохраняем с правильным расширением
@@ -354,6 +355,74 @@ async function downloadTrack(info) {
   fs.writeFileSync(target, Buffer.concat([id3Tag(info, cover), audioData]));
   progress(1);
   return { ok: true, path: target };
+}
+
+// --- Genius: ссылка на песню и текст -------------------------------------------------------
+// Genius прикрыт Cloudflare, поэтому при отказе обычного запроса открываем страницу
+// в скрытом окне Chromium — как обычный браузер.
+
+let geniusWin = null;
+function geniusPage() {
+  if (!geniusWin || geniusWin.isDestroyed()) {
+    geniusWin = new BrowserWindow({ show: false, webPreferences: { partition: 'persist:genius', sandbox: true, contextIsolation: true, images: false } });
+    geniusWin.webContents.setAudioMuted(true);
+  }
+  return geniusWin.webContents;
+}
+
+async function geniusLoad(url, script, timeoutMs = 20000) {
+  const wc = geniusPage();
+  await Promise.race([wc.loadURL(url), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs))]);
+  // ждём, пока пройдёт проверка Cloudflare и появится содержимое
+  for (let i = 0; i < 20; i++) {
+    const result = await wc.executeJavaScript(script, true).catch(() => null);
+    if (result) return result;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+const geniusClean = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+async function geniusFind({ artist, title }) {
+  const q = `${artist.split(/,|&| feat/i)[0]} ${title.replace(/\(.*?\)|\[.*?\]/g, '')}`.trim();
+  const api = `https://genius.com/api/search/multi?q=${encodeURIComponent(q)}`;
+  let data = null;
+  try {
+    const r = await net.fetch(api, { headers: { 'User-Agent': app.userAgentFallback, Accept: 'application/json' } });
+    if (r.ok) data = await r.json();
+  } catch {
+    data = null;
+  }
+  if (!data) {
+    const text = await geniusLoad(api, `(() => { try { return JSON.parse(document.body.innerText) && document.body.innerText; } catch { return null; } })()`).catch(() => null);
+    data = text ? JSON.parse(text) : null;
+  }
+  if (!data) return null;
+  const hits = (data.response.sections || []).flatMap((s) => s.hits || []).filter((h) => h.type === 'song').map((h) => h.result);
+  const wantTitle = geniusClean(title);
+  const wantArtist = geniusClean(artist.split(/,|&| feat/i)[0]);
+  const best = hits.find((h) => geniusClean(h.title).includes(wantTitle) && geniusClean(h.primary_artist && h.primary_artist.name).includes(wantArtist))
+    || hits.find((h) => geniusClean(h.title).includes(wantTitle));
+  return best ? best.url : null;
+}
+
+async function geniusLyrics(info) {
+  const url = await geniusFind(info);
+  if (!url) return null;
+  const text = await geniusLoad(url, `(() => {
+    const boxes = [...document.querySelectorAll('[data-lyrics-container="true"]')];
+    if (!boxes.length) return null;
+    return boxes.map((b) => {
+      const c = b.cloneNode(true);
+      c.querySelectorAll('[data-exclude-from-selection="true"]').forEach((x) => x.remove());
+      c.querySelectorAll('br').forEach((br) => br.replaceWith('\\n'));
+      return c.textContent;
+    }).join('\\n');
+  })()`);
+  if (!text) return null;
+  const lines = text.split('\n').map((l) => l.trim()).filter((l, i, arr) => l || (arr[i - 1] && arr[i - 1].trim()));
+  return { url, lines };
 }
 
 // --- Окно ----------------------------------------------------------------------------------
@@ -501,6 +570,30 @@ ipcMain.handle('download', async (_e, info) => {
   }
 });
 ipcMain.on('show-file', (_e, file) => { if (file) shell.showItemInFolder(file); });
+ipcMain.handle('audio-data', async (_e, url) => {
+  try {
+    const data = await fetchAudioData(url);
+    return { ok: true, data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle('genius-lyrics', async (_e, info) => {
+  try {
+    return await geniusLyrics(info);
+  } catch {
+    return null;
+  }
+});
+ipcMain.handle('genius-open', async (_e, info) => {
+  let url = null;
+  try {
+    url = await geniusFind(info);
+  } catch {
+    url = null;
+  }
+  shell.openExternal(url || `https://genius.com/search?q=${encodeURIComponent(`${info.artist} ${info.title}`)}`);
+});
 ipcMain.on('window', (_e, action) => {
   if (!win) return;
   if (action === 'fullscreen') { win.setFullScreen(!win.isFullScreen()); return; }
