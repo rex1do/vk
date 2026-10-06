@@ -242,15 +242,17 @@ async function hlsSegments(playlistUrl) {
   const segments = [];
   let key = null;
   let seq = 0;
+  let duration = 0;
   for (const line of lines) {
-    if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) seq = parseInt(line.split(':')[1], 10) || 0;
+    if (line.startsWith('#EXTINF:')) duration = parseFloat(line.slice(8)) || 0;
+    else if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) seq = parseInt(line.split(':')[1], 10) || 0;
     else if (line.startsWith('#EXT-X-KEY:')) {
       const method = /METHOD=([^,]+)/.exec(line);
       const uri = /URI="([^"]+)"/.exec(line);
       const iv = /IV=0x([0-9a-f]+)/i.exec(line);
       key = method && method[1] === 'AES-128' && uri ? { uri: new URL(uri[1], playlistUrl).href, iv: iv ? Buffer.from(iv[1].padStart(32, '0'), 'hex') : null } : null;
     } else if (!line.startsWith('#')) {
-      segments.push({ url: new URL(line, playlistUrl).href, key, seq });
+      segments.push({ url: new URL(line, playlistUrl).href, key, seq, duration });
       seq += 1;
     }
   }
@@ -306,9 +308,14 @@ function id3Tag({ title, artist, album }, cover) {
 }
 
 // Звук трека целиком (MP3/AAC без контейнера): для скачивания и для сравнения версий
-async function fetchAudioData(url, onProgress = () => {}) {
+// maxSeconds — только начало трека (для быстрой проверки версий)
+async function fetchAudioData(url, onProgress = () => {}, maxSeconds = 0) {
   if (!/\.m3u8/.test(url)) return fetchBuffer(url);
-  const segments = await hlsSegments(url);
+  let segments = await hlsSegments(url);
+  if (maxSeconds > 0) {
+    let total = 0;
+    segments = segments.filter((seg) => { const keep = total < maxSeconds; total += seg.duration || 10; return keep; });
+  }
   const keys = new Map();
   const parts = new Array(segments.length);
   let done = 0;
@@ -570,9 +577,9 @@ ipcMain.handle('download', async (_e, info) => {
   }
 });
 ipcMain.on('show-file', (_e, file) => { if (file) shell.showItemInFolder(file); });
-ipcMain.handle('audio-data', async (_e, url) => {
+ipcMain.handle('audio-data', async (_e, url, maxSeconds) => {
   try {
-    const data = await fetchAudioData(url);
+    const data = await fetchAudioData(url, () => {}, Number(maxSeconds) || 0);
     return { ok: true, data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
   } catch (err) {
     return { ok: false, error: err.message };

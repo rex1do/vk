@@ -1945,11 +1945,13 @@ const uncensor = {
 
   async candidates(track) {
     const artist = (track.artists[0] && track.artists[0].name) || track.artist.split(/,|&/)[0];
-    const queries = [`${artist} ${baseTitle(track.title) || track.title}`, `${artist} ${track.title}`];
+    // несколько формулировок запроса: копии пользователи подписывают по-разному
+    const base = baseTitle(track.title) || track.title;
+    const queries = [`${artist} ${base}`, `${artist} ${track.title}`, `${track.artist} ${base}`, `${base} ${artist}`, base];
     const seen = new Map();
     for (const q of [...new Set(queries)]) {
       try {
-        const resp = await vk('audio.search', { q, count: 60, auto_complete: 0 }, { cache: false });
+        const resp = await vk('audio.search', { q, count: 200, auto_complete: 0 }, { cache: false });
         (resp.items || []).map(normTrack).forEach((t) => seen.set(t.key, t));
       } catch {
         /* следующий запрос */
@@ -1957,7 +1959,7 @@ const uncensor = {
     }
     const score = (c) => (c.explicit ? 4 : 0) + (EVIDENCE_RE.test(`${c.title} ${c.subtitle}`) ? 2 : 0)
       + (normText(c.title) !== normText(track.title) ? 1 : 0) - Math.abs(c.duration - track.duration) * 0.1;
-    return [...seen.values()].filter((c) => this.isCandidate(track, c)).sort((a, b) => score(b) - score(a)).slice(0, 3);
+    return [...seen.values()].filter((c) => this.isCandidate(track, c)).sort((a, b) => score(b) - score(a)).slice(0, 12);
   },
 
   async urlOf(t) {
@@ -1971,8 +1973,8 @@ const uncensor = {
   },
 
   // карта громкости трека: скачиваем звук, декодируем в 8 кГц (экономно) и считаем уровни
-  async envelope(url) {
-    const res = await bridge.audioData(url);
+  async envelope(url, maxSeconds = 0) {
+    const res = await bridge.audioData(url, maxSeconds);
     if (!res.ok) throw new Error(res.error);
     if (!this.decodeCtx) this.decodeCtx = new OfflineAudioContext(1, 1, 8000);
     const bytes = res.data;
@@ -1991,18 +1993,29 @@ const uncensor = {
       const origUrl = await this.urlOf(track);
       if (!origUrl) return null;
       const origEnv = await this.envelope(origUrl);
-      for (const c of list) {
+      const PREVIEW_SEC = 45;
+      // проверка одного кандидата: сначала начало трека, целиком — только если начало совпало
+      const check = async (c) => {
         const url = await this.urlOf(c);
-        if (!url) continue;
-        let env;
+        if (!url) return false;
         try {
-          env = await this.envelope(url);
+          const head = await this.envelope(url, PREVIEW_SEC);
+          const quick = compareEnvelopes(origEnv.subarray(0, head.length), head);
+          if (quick.verdict === 'different') return false;
+          if (quick.verdict === 'uncensored') return true;
+          const full = await this.envelope(url);
+          return compareEnvelopes(origEnv, full).verdict === 'uncensored';
         } catch {
-          continue;
+          return false;
         }
-        const result = compareEnvelopes(origEnv, env);
-        if (result.verdict === 'uncensored') {
-          const found = { key: c.key, fullId: c.fullId, title: c.title, artist: c.artist };
+      };
+      // по два кандидата параллельно, по порядку приоритета
+      for (let i = 0; i < list.length; i += 2) {
+        const batch = list.slice(i, i + 2);
+        const results = await Promise.all(batch.map(check));
+        const hit = batch.find((_, j) => results[j]);
+        if (hit) {
+          const found = { key: hit.key, fullId: hit.fullId, title: hit.title, artist: hit.artist };
           this.remember(track.key, found);
           return found;
         }

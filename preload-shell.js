@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('vkp', {
   window: (action) => ipcRenderer.send('window', action),
   download: (info) => ipcRenderer.invoke('download', info),
   showFile: (file) => ipcRenderer.send('show-file', file),
-  audioData: (url) => ipcRenderer.invoke('audio-data', url),
+  audioData: (url, maxSeconds) => ipcRenderer.invoke('audio-data', url, maxSeconds),
   geniusLyrics: (info) => ipcRenderer.invoke('genius-lyrics', info),
   geniusOpen: (info) => ipcRenderer.invoke('genius-open', info),
   onDownloadProgress: (fn) => ipcRenderer.on('download-progress', (_e, data) => fn(data)),
