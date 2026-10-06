@@ -1,40 +1,73 @@
-// VK Player — отдельное окно для официальной ВК Музыки.
+// VK Player — десктопная оболочка для официальной ВК Музыки.
 //
-// Никаких неофициальных API и чужих токенов: открывается обычный сайт vk.com,
-// вход — на официальной странице ВК. Для ВКонтакте это выглядит как обычный Chrome,
-// поэтому нет риска заморозки, как у сторонних клиентов на токенах Kate Mobile.
+// Слева — своя панель (поиск, разделы, «Сейчас играет»), справа — музыкальный раздел
+// официального сайта vk.com без шапки-меню и рекламы. Никаких неофициальных API и чужих
+// токенов: вход на официальной странице ВК, для ВКонтакте это обычный Chrome.
 
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, screen } = require('electron');
+const {
+  app, BaseWindow, Menu, Tray, WebContentsView, ipcMain, nativeImage, nativeTheme, screen, shell,
+} = require('electron');
 const fs = require('fs');
 const path = require('path');
 
-const START_URL = 'https://vk.com/audio';
+const HOME_URL = 'https://vk.com/audio';
+const SIDEBAR_WIDTH = 248;
+const TITLEBAR_HEIGHT = 40;
 
-// Сайты, которые открываем внутри окна (ВК, вход через VK ID и партнёров). Остальное — в браузере.
-const INTERNAL_HOSTS = ['vk.com', 'vk.ru', 'vk.me', 'vkuser.net', 'userapi.com', 'vk-cdn.net', 'mail.ru', 'ok.ru'];
+// Разделы левой панели → адреса ВК Музыки
+const SECTIONS = {
+  home: 'https://vk.com/audio',
+  my: 'https://vk.com/audio?section=all',
+  recoms: 'https://vk.com/audio?section=recoms',
+  playlists: 'https://vk.com/audio?section=playlists',
+  chart: 'https://vk.com/audio?block=chart',
+  new: 'https://vk.com/audio?block=new_songs',
+};
+
+// Сайты, которые открываем внутри программы (ВК и вход через VK ID / Mail.ru / OK)
+const INTERNAL_HOSTS = ['vk.com', 'vk.ru', 'vk.me', 'vk-portal.net', 'vkuser.net', 'vkuserphoto.ru', 'userapi.com', 'vk-cdn.net', 'mail.ru', 'ok.ru'];
+
+// Прячем всё, что не относится к музыке: левое меню ВК, рекламу; растягиваем контент
+const VK_CSS = `
+#layout_sidebar, #ads_wrapper, #ads_with_extra, #ads_left, #ts_wrap { display: none !important; }
+#page_layout { width: auto !important; max-width: 1180px !important; margin: 0 auto !important;
+  padding: 0 24px !important; box-sizing: border-box !important; }
+#page_body, #spa_layout_content { width: 100% !important; max-width: none !important;
+  margin-left: 0 !important; float: none !important; }
+#page_header { width: auto !important; max-width: 1180px !important; margin: 0 auto !important;
+  padding: 0 24px !important; box-sizing: border-box !important; }
+::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+::-webkit-scrollbar-thumb { background: #3a3a3d; border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: #4a4a4e; }
+`;
 
 const isInternal = (url) => {
   try {
     const { protocol, hostname } = new URL(url);
-    if (protocol !== 'https:') return false;
-    return INTERNAL_HOSTS.some((h) => hostname === h || hostname.endsWith('.' + h));
+    return protocol === 'https:' && INTERNAL_HOSTS.some((h) => hostname === h || hostname.endsWith('.' + h));
   } catch {
     return false;
   }
 };
 
-// Убираем «Electron/…» и имя программы из User-Agent — сайт видит обычный Chrome
+// Сайт должен видеть обычный Chrome, без «Electron/…» и имени программы
 app.userAgentFallback = app.userAgentFallback
   .replace(/\sElectron\/\S+/, '')
-  .replace(new RegExp(`\\s${app.getName().replace(/[^\w-]/g, '\\$&')}\\/\\S+`, 'i'), '')
-  .replace(/\svk-player\/\S+/i, '');
+  .replace(/\s(?:vk-player|VK Player)\/\S+/gi, '');
+
+// Тёмная тема: ВК подхватывает её как системную
+nativeTheme.themeSource = 'dark';
 
 let win = null;
+let shellView = null;
+let vkView = null;
 let tray = null;
 let quitting = false;
-let trayHintShown = false;
+let settings = {};
+let lastNowPlaying = '';
+let lastUserId;
 
-// --- Настройки (размер окна и т.п.) --------------------------------------------------------
+// --- Настройки -----------------------------------------------------------------------------
 
 const settingsPath = () => path.join(app.getPath('userData'), 'window.json');
 
@@ -48,9 +81,9 @@ function loadSettings() {
 
 function saveSettings() {
   if (!win) return;
-  const data = { ...loadSettings(), bounds: win.getNormalBounds(), maximized: win.isMaximized(), trayHintShown };
+  settings = { ...settings, bounds: win.getNormalBounds(), maximized: win.isMaximized() };
   try {
-    fs.writeFileSync(settingsPath(), JSON.stringify(data));
+    fs.writeFileSync(settingsPath(), JSON.stringify(settings));
   } catch {
     /* не критично */
   }
@@ -58,15 +91,19 @@ function saveSettings() {
 
 function visibleBounds(bounds) {
   if (!bounds) return null;
-  const onScreen = screen.getAllDisplays().some(({ workArea: a }) =>
+  const ok = screen.getAllDisplays().some(({ workArea: a }) =>
     bounds.x < a.x + a.width && bounds.x + bounds.width > a.x && bounds.y < a.y + a.height && bounds.y + bounds.height > a.y);
-  return onScreen ? bounds : null;
+  return ok ? bounds : null;
 }
 
 // --- Окно ----------------------------------------------------------------------------------
 
-function iconPath() {
-  return path.join(__dirname, 'build', 'icon.png');
+const iconPath = () => path.join(__dirname, 'build', 'icon.png');
+
+function layout() {
+  const { width, height } = win.getContentBounds();
+  shellView.setBounds({ x: 0, y: 0, width, height });
+  vkView.setBounds({ x: SIDEBAR_WIDTH, y: TITLEBAR_HEIGHT, width: Math.max(0, width - SIDEBAR_WIDTH), height: Math.max(0, height - TITLEBAR_HEIGHT) });
 }
 
 function showWindow() {
@@ -76,66 +113,72 @@ function showWindow() {
   win.focus();
 }
 
-function createWindow() {
-  const settings = loadSettings();
-  trayHintShown = Boolean(settings.trayHintShown);
-  const bounds = visibleBounds(settings.bounds) || { width: 1200, height: 800 };
+function sendToShell(channel, payload) {
+  if (shellView && !shellView.webContents.isDestroyed()) shellView.webContents.send(channel, payload);
+}
 
-  win = new BrowserWindow({
+function sendNavState() {
+  const wc = vkView.webContents;
+  sendToShell('nav-state', {
+    url: wc.getURL(),
+    canGoBack: wc.navigationHistory.canGoBack(),
+    canGoForward: wc.navigationHistory.canGoForward(),
+    loading: wc.isLoading(),
+  });
+}
+
+function createWindow() {
+  settings = loadSettings();
+  const bounds = visibleBounds(settings.bounds) || { width: 1280, height: 820 };
+
+  win = new BaseWindow({
     ...bounds,
-    minWidth: 800,
-    minHeight: 560,
+    minWidth: 900,
+    minHeight: 580,
     title: 'VK Player',
     icon: iconPath(),
-    backgroundColor: '#19191a',
-    autoHideMenuBar: true,
+    backgroundColor: '#141414',
     show: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#141414', symbolColor: '#e1e3e6', height: TITLEBAR_HEIGHT },
+  });
+  win.setMenuBarVisibility(false);
+
+  // Наша оболочка: заголовок окна и левая панель
+  shellView = new WebContentsView({
     webPreferences: {
-      partition: 'persist:vk', // вход сохраняется между запусками
+      preload: path.join(__dirname, 'preload-shell.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: false, // музыка не должна притормаживать в свёрнутом окне
+    },
+  });
+  shellView.setBackgroundColor('#141414');
+  win.contentView.addChildView(shellView);
+  shellView.webContents.loadFile(path.join(__dirname, 'shell', 'index.html'));
+
+  // Официальный сайт ВК
+  vkView = new WebContentsView({
+    webPreferences: {
+      partition: 'persist:vk', // вход сохраняется между запусками
+      preload: path.join(__dirname, 'preload-vk.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false, // музыка не тормозит в свёрнутом окне
       spellcheck: false,
     },
   });
+  vkView.setBackgroundColor('#141414');
+  win.contentView.addChildView(vkView);
+  setupVkView(vkView.webContents);
+  vkView.webContents.loadURL(HOME_URL);
+
+  layout();
+  win.on('resize', () => { layout(); saveSettings(); });
+  win.on('move', saveSettings);
   if (settings.maximized) win.maximize();
-  win.once('ready-to-show', () => win.show());
-
-  win.loadURL(START_URL);
-
-  // Ссылки на другие сайты — в обычный браузер, всё про ВК — здесь же
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isInternal(url)) {
-      // Всплывающие окна входа (VK ID, Mail.ru, OK) открываем как дочерние окна
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          parent: win,
-          autoHideMenuBar: true,
-          width: 520,
-          height: 700,
-          webPreferences: { partition: 'persist:vk', contextIsolation: true, nodeIntegration: false, sandbox: true },
-        },
-      };
-    }
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!isInternal(url)) {
-      event.preventDefault();
-      shell.openExternal(url);
-    }
-  });
-
-  // Заголовок окна = название трека (ВК пишет его в title страницы во время игры)
-  win.webContents.on('page-title-updated', (event, title) => {
-    event.preventDefault();
-    const clean = title.replace(/\s*\|\s*ВКонтакте\s*$/i, '').trim();
-    win.setTitle(clean ? `${clean} — VK Player` : 'VK Player');
-    if (tray) tray.setToolTip(clean ? `VK Player — ${clean}`.slice(0, 127) : 'VK Player');
-  });
+  shellView.webContents.once('did-finish-load', () => win.show());
 
   // Крестик сворачивает в трей, музыка играет дальше
   win.on('close', (event) => {
@@ -143,8 +186,8 @@ function createWindow() {
     if (quitting || !tray) return;
     event.preventDefault();
     win.hide();
-    if (!trayHintShown && process.platform === 'win32') {
-      trayHintShown = true;
+    if (!settings.trayHintShown && process.platform === 'win32') {
+      settings.trayHintShown = true;
       saveSettings();
       tray.displayBalloon({
         iconType: 'info',
@@ -153,51 +196,147 @@ function createWindow() {
       });
     }
   });
-  win.on('resize', saveSettings);
-  win.on('move', saveSettings);
+
+  setInterval(pollNowPlaying, 1000);
 }
+
+function setupVkView(wc) {
+  wc.on('dom-ready', () => wc.insertCSS(VK_CSS).catch(() => {}));
+  for (const event of ['did-navigate', 'did-navigate-in-page', 'did-start-loading', 'did-stop-loading']) {
+    wc.on(event, sendNavState);
+  }
+
+  // Ссылки на сторонние сайты — в обычный браузер, всё про ВК — здесь же
+  wc.setWindowOpenHandler(({ url }) => {
+    if (isInternal(url)) {
+      // Всплывающие окна входа (VK ID, Mail.ru, OK) — дочерние окна с той же сессией
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          autoHideMenuBar: true,
+          width: 520,
+          height: 720,
+          backgroundColor: '#141414',
+          webPreferences: { partition: 'persist:vk', contextIsolation: true, nodeIntegration: false, sandbox: true },
+        },
+      };
+    }
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  wc.on('will-navigate', (event, url) => {
+    if (!isInternal(url)) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+}
+
+// --- «Сейчас играет» -----------------------------------------------------------------------
+
+async function pollNowPlaying() {
+  if (!vkView || vkView.webContents.isDestroyed()) return;
+  let info = null;
+  try {
+    const state = await vkView.webContents.executeJavaScript(
+      '({ np: window.__vkpNowPlaying ? window.__vkpNowPlaying() : null, uid: window.vk && typeof vk.id === "number" ? vk.id : null })', true);
+    info = state.np;
+    // vk.id === 0 — не вошли; null — страница ещё грузится или это страница входа
+    if (state.uid !== null && state.uid !== lastUserId) {
+      lastUserId = state.uid;
+      sendToShell('auth-state', { loggedIn: state.uid > 0 });
+    }
+  } catch {
+    return;
+  }
+  const key = JSON.stringify(info);
+  if (key === lastNowPlaying) return;
+  lastNowPlaying = key;
+  sendToShell('now-playing', info);
+  const name = info && info.title ? `${info.artist ? info.artist + ' — ' : ''}${info.title}` : '';
+  win.setTitle(name ? `${name} — VK Player` : 'VK Player');
+  if (tray) tray.setToolTip(name ? `VK Player — ${name}`.slice(0, 127) : 'VK Player');
+}
+
+function mediaAction(action) {
+  if (!vkView) return;
+  vkView.webContents.executeJavaScript(`window.__vkpAction && window.__vkpAction(${JSON.stringify(action)})`, true)
+    .then(() => setTimeout(pollNowPlaying, 150))
+    .catch(() => {});
+}
+
+// --- Команды из левой панели ---------------------------------------------------------------
+
+ipcMain.on('navigate', (_e, section) => {
+  if (SECTIONS[section]) vkView.webContents.loadURL(SECTIONS[section]);
+});
+ipcMain.on('login', () => {
+  // Нажимаем официальную кнопку «Войти» на странице ВК; если её нет — открываем страницу входа
+  vkView.webContents.executeJavaScript(`(() => {
+    const btn = [...document.querySelectorAll('button, a')].find((el) => /^(войти|sign in|log in)$/i.test(el.textContent.trim()));
+    if (btn) { btn.click(); return true; }
+    return false;
+  })()`, true).then((clicked) => {
+    if (!clicked) vkView.webContents.loadURL('https://vk.com/login');
+  }).catch(() => vkView.webContents.loadURL('https://vk.com/login'));
+});
+ipcMain.on('search', (_e, query) => {
+  const q = String(query || '').trim();
+  if (q) vkView.webContents.loadURL(`https://vk.com/audio?q=${encodeURIComponent(q)}`);
+});
+ipcMain.on('history', (_e, direction) => {
+  const h = vkView.webContents.navigationHistory;
+  if (direction === 'back' && h.canGoBack()) h.goBack();
+  if (direction === 'forward' && h.canGoForward()) h.goForward();
+  if (direction === 'reload') vkView.webContents.reload();
+});
+ipcMain.on('media', (_e, action) => {
+  if (['play', 'pause', 'previoustrack', 'nexttrack', 'toggle'].includes(action)) mediaAction(action);
+});
+ipcMain.on('shell-ready', () => {
+  sendNavState();
+  lastNowPlaying = '';
+  lastUserId = undefined;
+  pollNowPlaying();
+});
 
 // --- Трей и меню ---------------------------------------------------------------------------
 
 function createTray() {
-  const image = nativeImage.createFromPath(iconPath()).resize({ width: 16, height: 16 });
-  tray = new Tray(image);
+  tray = new Tray(nativeImage.createFromPath(iconPath()).resize({ width: 16, height: 16 }));
   tray.setToolTip('VK Player');
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: 'Открыть VK Player', click: showWindow },
-      { type: 'separator' },
-      { label: 'Моя музыка', click: () => { showWindow(); win.loadURL(START_URL); } },
-      { type: 'separator' },
-      { label: 'Выход', click: () => { quitting = true; app.quit(); } },
-    ]),
-  );
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Открыть VK Player', click: showWindow },
+    { type: 'separator' },
+    { label: 'Играть / пауза', click: () => mediaAction('toggle') },
+    { label: 'Следующий трек', click: () => mediaAction('nexttrack') },
+    { label: 'Предыдущий трек', click: () => mediaAction('previoustrack') },
+    { type: 'separator' },
+    { label: 'Выход', click: () => { quitting = true; app.quit(); } },
+  ]));
   tray.on('click', () => (win.isVisible() && win.isFocused() ? win.hide() : showWindow()));
 }
 
 function createMenu() {
-  // Меню скрыто (появляется по Alt), но горячие клавиши из него работают всегда
-  const nav = (fn) => () => win && fn(win.webContents);
-  Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      {
-        label: 'Плеер',
-        submenu: [
-          { label: 'Моя музыка', accelerator: 'CmdOrCtrl+M', click: nav((wc) => wc.loadURL(START_URL)) },
-          { label: 'Назад', accelerator: 'Alt+Left', click: nav((wc) => wc.navigationHistory.canGoBack() && wc.navigationHistory.goBack()) },
-          { label: 'Вперёд', accelerator: 'Alt+Right', click: nav((wc) => wc.navigationHistory.canGoForward() && wc.navigationHistory.goForward()) },
-          { label: 'Обновить', accelerator: 'F5', click: nav((wc) => wc.reload()) },
-          { type: 'separator' },
-          { label: 'Увеличить', accelerator: 'CmdOrCtrl+=', click: nav((wc) => wc.setZoomLevel(wc.getZoomLevel() + 0.5)) },
-          { label: 'Уменьшить', accelerator: 'CmdOrCtrl+-', click: nav((wc) => wc.setZoomLevel(wc.getZoomLevel() - 0.5)) },
-          { label: 'Обычный размер', accelerator: 'CmdOrCtrl+0', click: nav((wc) => wc.setZoomLevel(0)) },
-          { type: 'separator' },
-          { label: 'Свернуть в трей', accelerator: 'CmdOrCtrl+W', click: () => win && win.hide() },
-          { label: 'Выход', accelerator: 'CmdOrCtrl+Q', click: () => { quitting = true; app.quit(); } },
-        ],
-      },
-    ]),
-  );
+  // Меню не показывается, но его горячие клавиши работают
+  const vk = (fn) => () => vkView && fn(vkView.webContents);
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{
+    label: 'Плеер',
+    submenu: [
+      { label: 'Главная', accelerator: 'CmdOrCtrl+M', click: vk((wc) => wc.loadURL(HOME_URL)) },
+      { label: 'Поиск', accelerator: 'CmdOrCtrl+F', click: () => sendToShell('focus-search') },
+      { label: 'Назад', accelerator: 'Alt+Left', click: vk((wc) => wc.navigationHistory.canGoBack() && wc.navigationHistory.goBack()) },
+      { label: 'Вперёд', accelerator: 'Alt+Right', click: vk((wc) => wc.navigationHistory.canGoForward() && wc.navigationHistory.goForward()) },
+      { label: 'Обновить', accelerator: 'F5', click: vk((wc) => wc.reload()) },
+      { type: 'separator' },
+      { label: 'Увеличить', accelerator: 'CmdOrCtrl+=', click: vk((wc) => wc.setZoomLevel(wc.getZoomLevel() + 0.5)) },
+      { label: 'Уменьшить', accelerator: 'CmdOrCtrl+-', click: vk((wc) => wc.setZoomLevel(wc.getZoomLevel() - 0.5)) },
+      { label: 'Обычный размер', accelerator: 'CmdOrCtrl+0', click: vk((wc) => wc.setZoomLevel(0)) },
+      { type: 'separator' },
+      { label: 'Свернуть в трей', accelerator: 'CmdOrCtrl+W', click: () => win && win.hide() },
+      { label: 'Выход', accelerator: 'CmdOrCtrl+Q', click: () => { quitting = true; app.quit(); } },
+    ],
+  }]));
 }
 
 // --- Запуск --------------------------------------------------------------------------------
@@ -211,9 +350,7 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
     createTray();
   });
-  app.on('before-quit', () => {
-    quitting = true;
-  });
+  app.on('before-quit', () => { quitting = true; });
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
   });

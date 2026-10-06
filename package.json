@@ -1,8 +1,8 @@
 {
   "name": "vk-player",
   "productName": "VK Player",
-  "version": "2.0.0",
-  "description": "Отдельное окно для официальной ВК Музыки: трей, фоновое воспроизведение, медиаклавиши",
+  "version": "2.1.0",
+  "description": "Десктопный плеер для официальной ВК Музыки: своя панель, «Сейчас играет», трей, медиаклавиши",
   "main": "main.js",
   "license": "MIT",
   "scripts": {
@@ -16,13 +16,31 @@
   "build": {
     "appId": "local.vkplayer",
     "productName": "VK Player",
-    "files": ["main.js", "build/icon.png"],
-    "directories": { "output": "dist" },
+    "files": [
+      "main.js",
+      "preload-shell.js",
+      "preload-vk.js",
+      "shell/**",
+      "build/icon.png"
+    ],
+    "directories": {
+      "output": "dist"
+    },
     "win": {
       "icon": "build/icon.png",
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -30,6 +48,8 @@
       "allowToChangeInstallationDirectory": true,
       "artifactName": "VKPlayer-Setup-${version}.exe"
     },
-    "portable": { "artifactName": "VKPlayer-Portable-${version}.exe" }
+    "portable": {
+      "artifactName": "VKPlayer-Portable-${version}.exe"
+    }
   }
 }

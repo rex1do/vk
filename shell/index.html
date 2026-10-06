@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'">
+  <title>VK Player</title>
+  <link rel="stylesheet" href="shell.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand drag">
+      <img src="../build/icon.png" alt="" class="brand-icon">
+      <span>VK Player</span>
+    </div>
+
+    <form class="search" id="search-form">
+      <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg>
+      <input id="search" type="search" placeholder="Поиск музыки" autocomplete="off">
+    </form>
+
+    <nav>
+      <div class="group">Музыка</div>
+      <button class="item" data-section="home">
+        <svg viewBox="0 0 24 24"><path d="M4 11l8-6.5 8 6.5V20h-5v-5h-6v5H4z"/></svg>Главная
+      </button>
+      <button class="item" data-section="my">
+        <svg viewBox="0 0 24 24"><path d="M9.5 17.5V6l10-2v11.5"/><circle cx="7" cy="17.5" r="2.6" class="fill"/><circle cx="17" cy="15.5" r="2.6" class="fill"/></svg>Моя музыка
+      </button>
+      <button class="item" data-section="recoms">
+        <svg viewBox="0 0 24 24"><path class="fill" d="M11 3q1 7 8 8q-7 1-8 8q-1-7-8-8q7-1 8-8z"/></svg>Рекомендации
+      </button>
+      <button class="item" data-section="playlists">
+        <svg viewBox="0 0 24 24"><path d="M4 6h12M4 11h12M4 16h7"/><path class="fill" d="M14.5 13.5l6 3.5-6 3.5z"/></svg>Плейлисты
+      </button>
+      <div class="group">Обзор</div>
+      <button class="item" data-section="chart">
+        <svg viewBox="0 0 24 24"><path d="M5 20V12M12 20V5M19 20v-9"/></svg>Чарт
+      </button>
+      <button class="item" data-section="new">
+        <svg viewBox="0 0 24 24"><path d="M12 4v4M12 16v4M4 12h4M16 12h4M6.3 6.3l2.8 2.8M14.9 14.9l2.8 2.8M6.3 17.7l2.8-2.8M14.9 9.1l2.8-2.8"/></svg>Новинки
+      </button>
+    </nav>
+
+    <section class="login" id="login" hidden>
+      <div class="login-title">Войдите во ВКонтакте</div>
+      <div class="login-text">Чтобы слушать свою музыку и плейлисты. Вход — на официальной странице ВК.</div>
+      <button class="login-btn" id="login-btn">Войти</button>
+    </section>
+
+    <section class="now" id="now">
+      <div class="cover" id="cover">
+        <svg viewBox="0 0 24 24" class="cover-empty"><path d="M9.5 17.5V6l10-2v11.5"/><circle cx="7" cy="17.5" r="2.6" class="fill"/><circle cx="17" cy="15.5" r="2.6" class="fill"/></svg>
+        <img id="cover-img" alt="">
+      </div>
+      <div class="now-title" id="now-title">Ничего не играет</div>
+      <div class="now-artist" id="now-artist">Включите любой трек справа</div>
+      <div class="controls">
+        <button class="ctl" data-media="previoustrack" title="Предыдущий">
+          <svg viewBox="0 0 24 24"><path class="fill" d="M19 5L8.5 12 19 19z"/><rect class="fill" x="4.9" y="5" width="2.6" height="14" rx="1.2"/></svg>
+        </button>
+        <button class="ctl play" data-media="toggle" title="Играть / пауза" id="play">
+          <svg viewBox="0 0 24 24" class="icon-play"><path class="fill" d="M8 5l11.5 7L8 19z"/></svg>
+          <svg viewBox="0 0 24 24" class="icon-pause"><rect class="fill" x="6" y="5" width="4" height="14" rx="1.2"/><rect class="fill" x="14" y="5" width="4" height="14" rx="1.2"/></svg>
+        </button>
+        <button class="ctl" data-media="nexttrack" title="Следующий">
+          <svg viewBox="0 0 24 24"><path class="fill" d="M5 5l10.5 7L5 19z"/><rect class="fill" x="16.5" y="5" width="2.6" height="14" rx="1.2"/></svg>
+        </button>
+      </div>
+    </section>
+  </aside>
+
+  <header class="titlebar drag">
+    <button class="nav-btn" id="back" title="Назад (Alt+←)">
+      <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+    </button>
+    <button class="nav-btn" id="forward" title="Вперёд (Alt+→)">
+      <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+    </button>
+    <button class="nav-btn" id="reload" title="Обновить (F5)">
+      <svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 4.5V8h-3.5"/></svg>
+    </button>
+    <div class="title" id="title">ВК Музыка</div>
+    <div class="spinner" id="spinner"></div>
+  </header>
+
+  <script src="shell.js"></script>
+</body>
+</html>

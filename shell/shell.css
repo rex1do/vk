@@ -1,0 +1,132 @@
+:root {
+  --bg: #141414;
+  --sidebar: #19191a;
+  --surface: #232324;
+  --hover: #2a2a2c;
+  --active: #2c3542;
+  --border: #2a2a2c;
+  --text: #e1e3e6;
+  --muted: #8c8f94;
+  --accent: #5b9cf0;
+  --sidebar-width: 248px;
+  --titlebar: 40px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.35 "Segoe UI Variable Text", "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+svg .fill, svg.fill { fill: currentColor; stroke: none; }
+.drag { -webkit-app-region: drag; }
+.drag button, .drag input { -webkit-app-region: no-drag; }
+
+/* --- Левая панель --- */
+.sidebar {
+  position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width);
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: 0 14px 14px;
+}
+.brand {
+  height: var(--titlebar); display: flex; align-items: center; gap: 10px;
+  font-weight: 700; font-size: 15px; margin: 0 -14px; padding: 0 16px;
+}
+.brand-icon { width: 22px; height: 22px; border-radius: 6px; }
+
+.search {
+  position: relative; margin: 8px 0 10px;
+}
+.search svg { position: absolute; left: 10px; top: 9px; width: 18px; height: 18px; color: var(--muted); }
+.search input {
+  width: 100%; height: 36px; padding: 0 12px 0 36px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid transparent; border-radius: 10px; outline: none;
+  font: inherit;
+}
+.search input::placeholder { color: var(--muted); }
+.search input:focus { border-color: var(--accent); }
+
+nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.group {
+  color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  padding: 14px 10px 6px;
+}
+.item {
+  display: flex; align-items: center; gap: 12px;
+  height: 38px; padding: 0 10px; border-radius: 10px; text-align: left;
+  color: var(--text);
+}
+.item svg { color: var(--muted); }
+.item:hover { background: var(--hover); }
+.item.active { background: var(--active); color: #fff; }
+.item.active svg { color: var(--accent); }
+
+/* --- Вход --- */
+.login {
+  margin-top: auto; background: var(--surface); border-radius: 14px; padding: 16px;
+}
+.login[hidden] { display: none; }
+.login-title { font-weight: 600; font-size: 15px; }
+.login-text { color: var(--muted); font-size: 13px; margin: 6px 0 14px; }
+.login-btn {
+  width: 100%; height: 38px; border-radius: 10px; background: var(--accent); color: #fff; font-weight: 600;
+}
+.login-btn:hover { background: #71aaf3; }
+.login:not([hidden]) + .now { display: none; }
+
+/* --- Сейчас играет --- */
+.now {
+  margin-top: auto;
+  background: var(--surface);
+  border-radius: 14px; padding: 12px;
+  display: flex; flex-direction: column; align-items: stretch;
+}
+.cover {
+  position: relative; aspect-ratio: 1 / 1; border-radius: 10px; overflow: hidden;
+  background: linear-gradient(135deg, #2f3a4c, #1f2633);
+  display: grid; place-items: center; margin-bottom: 12px;
+}
+.cover-empty { width: 56px; height: 56px; color: #5a6475; }
+.cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: none; }
+.cover.has-art img { display: block; }
+.now-title, .now-artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.now-title { font-weight: 600; font-size: 15px; }
+.now-artist { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.controls { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 12px; }
+.ctl { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: var(--text); }
+.ctl:hover { background: var(--hover); }
+.ctl svg { width: 18px; height: 18px; }
+.ctl.play { width: 46px; height: 46px; background: #fff; color: var(--bg); }
+.ctl.play:hover { background: #dfe3e8; }
+.ctl.play svg { width: 22px; height: 22px; }
+.ctl.play .icon-pause, .now.playing .ctl.play .icon-play { display: none; }
+.now.playing .ctl.play .icon-pause { display: block; }
+.now.idle .controls { opacity: .45; pointer-events: none; }
+
+/* --- Заголовок окна --- */
+.titlebar {
+  position: fixed; top: 0; left: var(--sidebar-width); right: 0; height: var(--titlebar);
+  display: flex; align-items: center; gap: 2px; padding: 0 150px 0 10px; /* справа — системные кнопки окна */
+  background: var(--bg);
+}
+.nav-btn { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; color: var(--text); }
+.nav-btn svg { width: 18px; height: 18px; }
+.nav-btn:hover:not(:disabled) { background: var(--hover); }
+.nav-btn:disabled { color: #4a4a4e; cursor: default; }
+.title { margin-left: 10px; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spinner {
+  width: 14px; height: 14px; margin-left: 8px; border-radius: 50%;
+  border: 2px solid #3a3a3d; border-top-color: var(--accent);
+  animation: spin .8s linear infinite; visibility: hidden;
+}
+.spinner.on { visibility: visible; }
+@keyframes spin { to { transform: rotate(360deg); } }
