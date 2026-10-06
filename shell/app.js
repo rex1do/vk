@@ -1143,7 +1143,8 @@ function renderNowPlaying() {
   lyrics.trackChanged();
   const tiny = t ? t.cover(68) : '';
   setAmbient(tiny);
-  $('#fs-glow').style.backgroundImage = tiny ? `url("${tiny.replace(/"/g, '%22')}")` : 'none';
+  const bgImage = t && t.cover(135) ? `url("${t.cover(135).replace(/"/g, '%22')}")` : 'none';
+  $$('.fs-bg-layer').forEach((layer) => { layer.style.backgroundImage = bgImage; });
   bridge.trackTitle(t ? `${t.artist} — ${t.title}` : '');
   renderQueue();
   updateMediaSession(true);
@@ -1284,7 +1285,7 @@ const lyrics = {
     this.key = null;
     this.lines = [];
     this.active = -1;
-    if (sheet.open) this.load();
+    if (sheet.open && fsModes.current === 'lyrics') this.load();
   },
 
   parse(resp, duration) {
@@ -1356,16 +1357,34 @@ const lyrics = {
   },
 };
 
-// вкладки «Текст» / «Далее»
-$$('[data-fs-tab]').forEach((tab) => tab.addEventListener('click', () => {
-  const name = tab.dataset.fsTab;
-  const already = tab.classList.contains('active');
-  $$('[data-fs-tab]').forEach((t) => t.classList.toggle('active', t === tab));
-  $$('[data-fs-pane]').forEach((p) => { p.hidden = p.dataset.fsPane !== name; });
-  // в узком окне панель открывается поверх обложки; повторный клик — закрыть
-  fs.classList.toggle('panel-open', !(already && fs.classList.contains('panel-open')));
-  if (name === 'lyrics') { lyrics.load(); lyrics.update(true); }
-}));
+// режимы полноэкранного плеера: «Обложка» / «Текст» / «Далее»
+const fsModes = {
+  current: localStorage.getItem('fsMode') || 'cover',
+
+  set(name) {
+    this.current = name;
+    localStorage.setItem('fsMode', name);
+    const fsEl = $('#fs');
+    fsEl.classList.remove('mode-cover', 'mode-lyrics', 'mode-queue');
+    fsEl.classList.add(`mode-${name}`);
+    $$('[data-fs-tab]').forEach((t) => t.classList.toggle('active', t.dataset.fsTab === name));
+    $$('[data-fs-pane]').forEach((p) => { p.hidden = p.dataset.fsPane !== name; });
+    this.moveIndicator();
+    if (name === 'lyrics') { lyrics.load(); requestAnimationFrame(() => lyrics.update(true)); }
+    if (name === 'queue') renderQueue();
+  },
+
+  // белый ползунок перетекает под выбранную вкладку
+  moveIndicator() {
+    const tab = $(`[data-fs-tab="${this.current}"]`);
+    const ind = $('#fs-tab-ind');
+    if (!tab || !ind || !tab.offsetWidth) return;
+    ind.style.width = `${tab.offsetWidth}px`;
+    ind.style.transform = `translateX(${tab.offsetLeft}px)`;
+  },
+};
+$$('[data-fs-tab]').forEach((tab) => tab.addEventListener('click', () => fsModes.set(tab.dataset.fsTab)));
+window.addEventListener('resize', () => fsModes.moveIndicator());
 
 // --- Полноэкранный плеер: лист с пружинами и жестом ----------------------------------------
 
@@ -1415,8 +1434,7 @@ const sheet = {
     if (!player.current) return;
     fs.hidden = false;
     this.open = true;
-    renderQueue();
-    lyrics.load();
+    fsModes.set(fsModes.current);
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.set(0); this.cover(true); return; }
     // появляется оттуда, где была нижняя панель
     this.set(window.innerHeight);

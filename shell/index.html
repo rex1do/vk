@@ -146,15 +146,32 @@
 
   <!-- Полноэкранный плеер -->
   <section class="fullscreen" id="fs" hidden>
-    <div class="fs-glow" id="fs-glow"></div>
+    <!-- живой фон: размытые копии обложки медленно плывут и вращаются -->
+    <div class="fs-bg" id="fs-bg" aria-hidden="true">
+      <div class="fs-bg-layer l1"></div>
+      <div class="fs-bg-layer l2"></div>
+      <div class="fs-bg-layer l3"></div>
+      <div class="fs-bg-shade"></div>
+    </div>
     <div class="fs-top drag">
       <div class="fs-grabber" id="fs-grabber" title="Потяните вниз, чтобы свернуть"></div>
       <button class="icon-btn fs-close" id="fs-close" title="Свернуть (Esc)">
         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
       </button>
-      <div class="fs-tabs" role="tablist">
-        <button class="fs-tab active" data-fs-tab="lyrics" role="tab">Текст</button>
-        <button class="fs-tab" data-fs-tab="queue" role="tab">Далее</button>
+      <div class="fs-tabs" role="tablist" id="fs-tabs">
+        <span class="fs-tab-ind" id="fs-tab-ind"></span>
+        <button class="fs-tab" data-fs-tab="cover" role="tab" title="Только обложка">
+          <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M4 16l4.5-4.5a1.5 1.5 0 0 1 2.1 0L16 17M14 14l1.5-1.5a1.5 1.5 0 0 1 2.1 0L20 15"/><circle cx="15.5" cy="8.5" r="1.5" class="fill"/></svg>
+          <span>Обложка</span>
+        </button>
+        <button class="fs-tab" data-fs-tab="lyrics" role="tab" title="Текст песни">
+          <svg viewBox="0 0 24 24"><path d="M5 6h14M5 10.5h10M5 15h12M5 19.5h7"/></svg>
+          <span>Текст</span>
+        </button>
+        <button class="fs-tab" data-fs-tab="queue" role="tab" title="Очередь">
+          <svg viewBox="0 0 24 24"><path d="M4 6h11M4 11h11M4 16h7"/><path class="fill" d="M15.5 13.5l5 3-5 3z"/></svg>
+          <span>Далее</span>
+        </button>
       </div>
     </div>
     <div class="fs-body">
