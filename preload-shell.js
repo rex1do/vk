@@ -16,5 +16,6 @@ contextBridge.exposeInMainWorld('vkp', {
   onLoginClosed: (fn) => ipcRenderer.on('login-closed', () => fn()),
   onWindowState: (fn) => ipcRenderer.on('window-state', (_e, state) => fn(state)),
   onMedia: (fn) => ipcRenderer.on('media', (_e, action) => fn(action)),
+  onWindowVisible: (fn) => ipcRenderer.on('window-visible', (_e, visible) => fn(visible)),
   onFocusSearch: (fn) => ipcRenderer.on('focus-search', () => fn()),
 });

@@ -63,14 +63,31 @@ function toast(text) {
 
 // --- API ВКонтакте -------------------------------------------------------------------------
 
-async function vk(method, params = {}) {
-  const res = await bridge.api(method, params);
-  if (!res.ok) {
-    const err = new Error(res.error || 'Ошибка ВКонтакте');
-    err.code = res.code;
-    throw err;
+// Ответы на «читающие» запросы кэшируем ненадолго: назад/вперёд и повторные открытия — мгновенно
+const CACHEABLE = /^(catalog\.|audio\.(get|getPlaylists|getPlaylistById|getRecommendations|search)$|users\.get$)/;
+const apiCache = new Map();
+const CACHE_TTL = 3 * 60 * 1000;
+
+async function vk(method, params = {}, { cache = CACHEABLE.test(method) } = {}) {
+  const key = cache ? method + JSON.stringify(params) : null;
+  if (key) {
+    const hit = apiCache.get(key);
+    if (hit && Date.now() - hit.time < CACHE_TTL) return hit.promise;
   }
-  return res.data;
+  const promise = bridge.api(method, params).then((res) => {
+    if (!res.ok) {
+      const err = new Error(res.error || 'Ошибка ВКонтакте');
+      err.code = res.code;
+      throw err;
+    }
+    return res.data;
+  });
+  if (key) {
+    apiCache.set(key, { time: Date.now(), promise });
+    promise.catch(() => apiCache.delete(key));
+    if (apiCache.size > 200) apiCache.delete(apiCache.keys().next().value);
+  }
+  return promise;
 }
 
 // --- Нормализация данных -------------------------------------------------------------------
@@ -203,6 +220,7 @@ bridge.onLoginClosed(() => {
 bridge.onAuthChanged(async ({ loggedIn }) => {
   const changed = loggedIn !== auth.loggedIn;
   auth.loggedIn = loggedIn;
+  if (changed) { apiCache.clear(); suggestCache.clear(); router.dropCache(); }
   await refreshMe();
   if (changed) router.reload();
 });
@@ -225,7 +243,7 @@ function trackRow(track, list, index, { number = false } = {}) {
   },
   number ? el('div', { class: 'row-num', text: String(index + 1) }) : null,
   el('div', { class: 'row-cover' },
-    el('img', { src: track.cover(135) || null, alt: '', loading: 'lazy' }),
+    el('img', { src: track.cover(135) || null, alt: '', loading: 'lazy', decoding: 'async', width: '46', height: '46' }),
     el('div', { class: 'row-overlay', html: `${ICON.play.replace('<svg', '<svg class="icon-play"')}<span class="eq"><i></i><i></i><i></i></span>` })),
   el('div', { class: 'row-text' },
     el('div', { class: 'row-title' }, track.title + (track.subtitle ? ` (${track.subtitle})` : ''), track.explicit ? el('span', { class: 'explicit', text: 'E' }) : null),
@@ -244,7 +262,7 @@ function trackList(tracks, { number = true } = {}) {
 function playlistCard(p) {
   return el('div', { class: 'card', role: 'button', tabindex: '0', onclick: () => router.go('playlist', p) },
     el('div', { class: 'card-cover' },
-      el('img', { src: p.cover(600) || null, alt: '', loading: 'lazy' }),
+      el('img', { src: p.cover(300) || null, alt: '', loading: 'lazy', decoding: 'async' }),
       el('button', {
         class: 'card-play', title: 'Слушать', html: ICON.play,
         onclick: (e) => { e.stopPropagation(); playPlaylist(p); },
@@ -494,25 +512,48 @@ const router = {
   index: -1,
   token: 0,
   go(name, params, { push = true } = {}) {
+    this.saveCurrent();
     if (push) {
       this.stack = this.stack.slice(0, this.index + 1);
       this.stack.push({ name, params });
+      if (this.stack.length > 30) this.stack.shift();
       this.index = this.stack.length - 1;
     }
     this.render();
   },
-  back() { if (this.index > 0) { this.index -= 1; this.render(); } },
-  forward() { if (this.index < this.stack.length - 1) { this.index += 1; this.render(); } },
-  reload() { if (this.index >= 0) this.render(); },
-  async render() {
-    const { name, params } = this.stack[this.index];
+  back() { if (this.index > 0) { this.saveCurrent(); this.index -= 1; this.render({ restore: true }); } },
+  forward() { if (this.index < this.stack.length - 1) { this.saveCurrent(); this.index += 1; this.render({ restore: true }); } },
+  reload() { if (this.index >= 0) { this.dropCache(); this.render(); } },
+  // запоминаем готовый экран и прокрутку, чтобы «назад» открывался мгновенно
+  saveCurrent() {
+    const entry = this.stack[this.index];
+    const view = $('#view');
+    if (entry && view && !view.querySelector('.skeleton')) {
+      entry.node = view;
+      entry.scroll = content.scrollTop;
+      entry.more = loadMore;
+      entry.time = Date.now();
+    }
+  },
+  dropCache() { this.stack.forEach((e) => { e.node = null; }); },
+  async render({ restore = false } = {}) {
+    const entry = this.stack[this.index];
+    const { name, params } = entry;
     const token = ++this.token;
     loadMore = null;
     $$('[data-route]').forEach((b) => b.classList.toggle('active', b.dataset.route === name));
     $('#back').disabled = this.index <= 0;
     $('#forward').disabled = this.index >= this.stack.length - 1;
-    const view = $('#view');
-    view.replaceChildren(loadingView());
+    if (restore && entry.node && Date.now() - entry.time < CACHE_TTL) {
+      $('#view').replaceWith(entry.node);
+      content.scrollTop = entry.scroll || 0;
+      loadMore = entry.more || null;
+      player.markRows();
+      return;
+    }
+    // новый элемент, а не очистка старого: старый экран лежит в кэше для «назад»
+    const view = el('div', { class: 'view', id: 'view' }, loadingView());
+    $('#view').replaceWith(view);
     content.scrollTop = 0;
     let nodes;
     try {
@@ -540,6 +581,7 @@ const suggest = $('#suggest');
 let suggestToken = 0;
 let suggestTimer = null;
 let suggestSel = -1;
+const suggestCache = new Map();
 
 function closeSuggest() {
   suggest.hidden = true;
@@ -574,12 +616,16 @@ async function updateSuggest() {
     suggest.hidden = false;
     return;
   }
-  let items = [];
-  try {
-    const resp = await vk('audio.search', { q, count: 7, auto_complete: 1 });
-    items = (resp.items || []).map(normTrack);
-  } catch {
-    /* покажем хотя бы строку поиска */
+  let items = suggestCache.get(q.toLowerCase());
+  if (!items) {
+    try {
+      const resp = await vk('audio.search', { q, count: 7, auto_complete: 1 });
+      items = (resp.items || []).map(normTrack);
+      suggestCache.set(q.toLowerCase(), items);
+      if (suggestCache.size > 100) suggestCache.delete(suggestCache.keys().next().value);
+    } catch {
+      items = []; // покажем хотя бы строку поиска
+    }
   }
   if (token !== suggestToken) return;
   const artists = [...new Set(items.flatMap((t) => t.artists.length ? t.artists : [t.artist]).filter(Boolean))]
@@ -687,7 +733,7 @@ const player = {
     this.markRows();
     if (!track.url) {
       try {
-        const [fresh] = await vk('audio.getById', { audios: track.fullId });
+        const [fresh] = await vk('audio.getById', { audios: track.fullId }, { cache: false });
         if (fresh && fresh.url) track.url = fresh.url;
       } catch {
         /* нет доступа */
@@ -704,14 +750,20 @@ const player = {
   attach(url, id, track, retried = false) {
     this.destroyHls();
     if (/\.m3u8/.test(url) && window.Hls && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, maxBufferLength: 40, startFragPrefetch: true });
+      const hls = new Hls({
+        enableWorker: true,
+        startFragPrefetch: true,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        backBufferLength: 30, // по умолчанию hls.js хранит весь прослушанный трек в памяти
+      });
       this.hls = hls;
       hls.on(Hls.Events.ERROR, async (_e, data) => {
         if (!data.fatal || id !== this.loadId) return;
         // ссылка протухла — спрашиваем свежую и пробуем ещё раз
         if (!retried && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           try {
-            const [fresh] = await vk('audio.getById', { audios: track.fullId });
+            const [fresh] = await vk('audio.getById', { audios: track.fullId }, { cache: false });
             if (fresh && fresh.url && id === this.loadId) {
               track.url = fresh.url;
               return this.attach(fresh.url, id, track, true);
@@ -785,7 +837,25 @@ const player = {
   },
 };
 
-audio.addEventListener('playing', () => { player.skips = 0; });
+audio.addEventListener('playing', () => {
+  player.skips = 0;
+  prepareNext();
+});
+
+// Пока играет трек, тихо получаем ссылку на следующий — переход будет без паузы
+let preparedKey = null;
+async function prepareNext() {
+  const nextPos = player.pos + 1 < player.order.length ? player.pos + 1 : (player.repeat === 'all' ? 0 : -1);
+  const next = nextPos >= 0 ? player.queue[player.order[nextPos]] : null;
+  if (!next || next.url || preparedKey === next.key) return;
+  preparedKey = next.key;
+  try {
+    const [fresh] = await vk('audio.getById', { audios: next.fullId }, { cache: false });
+    if (fresh && fresh.url) next.url = fresh.url;
+  } catch {
+    /* попробуем при переключении */
+  }
+}
 audio.addEventListener('play', () => { document.body.classList.add('is-playing'); updateMediaSession(); });
 audio.addEventListener('pause', () => { document.body.classList.remove('is-playing'); updateMediaSession(); });
 audio.addEventListener('ended', () => player.next(true));
@@ -830,8 +900,9 @@ function renderNowPlaying() {
   if (big) fsImg.src = big; else fsImg.removeAttribute('src');
   $('#fs-title').textContent = t ? t.title : '';
   $('#fs-artist').textContent = t ? t.artist : '';
-  setAmbient(t ? t.cover(600) : '');
-  $('#fs-glow').style.backgroundImage = t && t.cover(300) ? `url("${t.cover(300).replace(/"/g, '%22')}")` : 'none';
+  const tiny = t ? t.cover(68) : '';
+  setAmbient(tiny);
+  $('#fs-glow').style.backgroundImage = tiny ? `url("${tiny.replace(/"/g, '%22')}")` : 'none';
   bridge.trackTitle(t ? `${t.artist} — ${t.title}` : '');
   renderQueue();
   updateMediaSession(true);
@@ -863,22 +934,37 @@ function renderModes() {
 // перемотка и громкость: следуют за курсором 1:1, применяются при отпускании
 const setFill = (input) => input.style.setProperty('--p', `${((input.value - input.min) / ((input.max - input.min) || 1)) * 100}%`);
 let seeking = false;
+const seekEls = $$('.seek');
+const posEls = $$('[data-bind="pos"]');
+const durEls = $$('[data-bind="dur"]');
+let progressQueued = false;
+let lastPosText = '';
+let lastDurText = '';
 function renderProgress() {
-  const d = isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (player.current ? player.current.duration : 0);
-  if (!seeking) {
-    $$('.seek').forEach((s) => { s.value = d ? Math.round((audio.currentTime / d) * 1000) : 0; setFill(s); });
-    $$('[data-bind="pos"]').forEach((n) => { n.textContent = fmt(audio.currentTime); });
-  }
-  $$('[data-bind="dur"]').forEach((n) => { n.textContent = fmt(d); });
+  if (progressQueued) return;
+  progressQueued = true;
+  requestAnimationFrame(() => {
+    progressQueued = false;
+    if (document.body.classList.contains('paused')) return; // окно свёрнуто — не рисуем
+    const d = isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (player.current ? player.current.duration : 0);
+    if (!seeking) {
+      const value = d ? Math.round((audio.currentTime / d) * 1000) : 0;
+      seekEls.forEach((s) => { if (Number(s.value) !== value) { s.value = value; setFill(s); } });
+      const posText = fmt(audio.currentTime);
+      if (posText !== lastPosText) { lastPosText = posText; posEls.forEach((n) => { n.textContent = posText; }); }
+    }
+    const durText = fmt(d);
+    if (durText !== lastDurText) { lastDurText = durText; durEls.forEach((n) => { n.textContent = durText; }); }
+  });
 }
-$$('.seek').forEach((s) => {
+seekEls.forEach((s) => {
   s.addEventListener('pointerdown', () => { seeking = true; });
   s.addEventListener('input', () => {
     seeking = true;
     setFill(s);
     const d = isFinite(audio.duration) ? audio.duration : 0;
-    $$('[data-bind="pos"]').forEach((n) => { n.textContent = fmt((s.value / 1000) * d); });
-    $$('.seek').forEach((o) => { if (o !== s) { o.value = s.value; setFill(o); } });
+    posEls.forEach((n) => { n.textContent = fmt((s.value / 1000) * d); });
+    seekEls.forEach((o) => { if (o !== s) { o.value = s.value; setFill(o); } });
   });
   s.addEventListener('change', () => {
     const d = isFinite(audio.duration) ? audio.duration : 0;
@@ -978,19 +1064,23 @@ const sheet = {
     this.raf = requestAnimationFrame(step);
   },
 
+  // пока лист полностью открыт, интерфейс под ним не рисуем
+  cover(on) { document.body.classList.toggle('fs-covered', on); },
+
   show() {
     if (!player.current) return;
     fs.hidden = false;
     this.open = true;
     renderQueue();
-    if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.set(0); return; }
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.set(0); this.cover(true); return; }
     // появляется оттуда, где была нижняя панель
     this.set(window.innerHeight);
-    this.springTo(0, { velocity: 0, damping: 1, response: 0.42 });
+    this.springTo(0, { velocity: 0, damping: 1, response: 0.42 }, () => this.cover(true));
   },
 
   hide(velocity = 0) {
     this.open = false;
+    this.cover(false);
     const finish = () => { fs.hidden = true; };
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) { finish(); return; }
     this.springTo(window.innerHeight, { velocity: Math.max(velocity, 0), damping: 1, response: 0.36 }, finish);
@@ -1011,6 +1101,7 @@ const sheet = {
     if (e.button !== 0 || e.target.closest('button, input')) return;
     dragging = true;
     cancelAnimationFrame(sheet.raf); // перехватываем лист прямо на лету
+    sheet.cover(false);
     startY = e.clientY;
     startSheetY = sheet.y;
     history = [{ y: e.clientY, t: performance.now() }];
@@ -1033,7 +1124,7 @@ const sheet = {
     const v = dt > 0 ? (b.y - a.y) / dt : 0;
     const projected = sheet.y + project(v);
     if (projected > window.innerHeight * 0.3 && v > -200) sheet.hide(v);
-    else sheet.springTo(0, { velocity: v, damping: 0.85, response: 0.36 });
+    else sheet.springTo(0, { velocity: v, damping: 0.85, response: 0.36 }, () => sheet.cover(true));
   };
   for (const target of [$('#fs-grabber'), $('#fs-cover'), $('.fs-top')]) {
     target.addEventListener('pointerdown', onDown);
@@ -1066,12 +1157,18 @@ document.addEventListener('keydown', (e) => {
 
 // --- Окно ----------------------------------------------------------------------------------
 
+bridge.onWindowVisible((visible) => {
+  document.body.classList.toggle('paused', !visible);
+  if (visible) renderProgress();
+});
+
 $$('[data-window]').forEach((btn) => btn.addEventListener('click', () => bridge.window(btn.dataset.window)));
 bridge.onWindowState(({ maximized }) => $('#window-buttons').classList.toggle('maximized', maximized));
 
 // --- Старт ---------------------------------------------------------------------------------
 
 (async function start() {
+  $('#view').replaceChildren(loadingView()); // заглушка сразу, пока ВК отвечает
   setVolume(lastVolume, false);
   renderModes();
   renderNowPlaying();

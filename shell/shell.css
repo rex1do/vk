@@ -17,7 +17,7 @@
   --gloss: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0.08) 48%, rgba(255, 255, 255, 0) 52%);
 
   /* материалы: тяжёлый (структура) и лёгкий (интерактивные элементы) */
-  --mat-heavy: rgba(14, 14, 24, 0.55);
+  --mat-heavy: rgba(14, 14, 24, 0.6);
   --mat-light: linear-gradient(135deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.04));
   --edge: rgba(255, 255, 255, 0.14);
   --edge-top: rgba(255, 255, 255, 0.32);
@@ -60,16 +60,19 @@ button:active:not(:disabled) { transform: scale(0.96); }
 /* --- Фон: размытая обложка, голографические пятна, искорки --- */
 .ambient { position: fixed; inset: 0; overflow: hidden; z-index: 0; }
 .ambient-layer {
-  position: absolute; inset: -15%;
+  position: absolute; inset: -10%;
   background-size: cover; background-position: center;
-  filter: blur(90px) saturate(1.7) brightness(0.5);
-  opacity: 0; transition: opacity 1.4s ease;
+  /* в фон ставится обложка 34–68px: растянутая браузером, она уже мягкая, большой blur не нужен */
+  filter: blur(24px) saturate(1.7) brightness(0.5);
+  opacity: 0; transition: opacity 1.2s ease;
+  will-change: opacity;
 }
 .ambient-layer.on { opacity: 1; }
-.ambient-blob { position: absolute; border-radius: 50%; filter: blur(110px); opacity: .5; transition: opacity 1.4s ease; }
-.blob-1 { width: 58vw; height: 58vw; left: -18vw; top: -26vw; background: radial-gradient(circle, #6f7bff, #3a2fb8 70%); }
-.blob-2 { width: 54vw; height: 54vw; right: -18vw; bottom: -28vw; background: radial-gradient(circle, #ff7ccf, #8f2f9e 70%); }
-.blob-3 { width: 30vw; height: 30vw; right: 18vw; top: -12vw; background: radial-gradient(circle, #7ff0ff, transparent 70%); opacity: .25; }
+.ambient-blob { position: absolute; border-radius: 50%; opacity: .5; transition: opacity 1.2s ease; }
+/* мягкие пятна — радиальными градиентами, без дорогого filter: blur */
+.blob-1 { width: 80vw; height: 80vw; left: -32vw; top: -40vw; background: radial-gradient(circle, rgba(111,123,255,.9), rgba(58,47,184,.35) 40%, transparent 68%); }
+.blob-2 { width: 76vw; height: 76vw; right: -30vw; bottom: -42vw; background: radial-gradient(circle, rgba(255,124,207,.85), rgba(143,47,158,.35) 40%, transparent 68%); }
+.blob-3 { width: 44vw; height: 44vw; right: 12vw; top: -22vw; background: radial-gradient(circle, rgba(127,240,255,.6), transparent 65%); opacity: .25; }
 body.has-art .ambient-blob { opacity: .12; }
 .ambient-shade { position: absolute; inset: 0; background: radial-gradient(120% 90% at 50% 0%, rgba(7,7,13,.1), rgba(7,7,13,.72)); }
 /* сетка-«киберпространство» из 2000-х, едва заметная */
@@ -92,7 +95,6 @@ body.has-art .ambient-blob { opacity: .12; }
   border: 1px solid var(--edge);
   border-top-color: var(--edge-top); /* свет падает сверху */
   box-shadow: inset 0 1px 0 rgba(255,255,255,.18), var(--shadow-s);
-  backdrop-filter: blur(24px) saturate(170%);
   border-radius: var(--radius);
 }
 .heavy {
@@ -100,7 +102,6 @@ body.has-art .ambient-blob { opacity: .12; }
   border: 1px solid rgba(255,255,255,.08);
   border-top-color: rgba(255,255,255,.16);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.08), var(--shadow-l);
-  backdrop-filter: blur(40px) saturate(150%);
   border-radius: var(--radius);
 }
 
@@ -213,10 +214,7 @@ nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; overflo
 .user-name { flex: 1; min-width: 0; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* --- Контент: края растворяются под «хромом» вместо линий --- */
-.content {
-  grid-area: content; overflow-y: auto; overflow-x: hidden; min-height: 0;
-  mask-image: linear-gradient(180deg, transparent 0, #000 18px, #000 calc(100% - 22px), transparent 100%);
-}
+.content { grid-area: content; overflow-y: auto; overflow-x: hidden; min-height: 0; contain: strict; }
 .content::-webkit-scrollbar { width: 10px; }
 .content::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 5px; border: 3px solid transparent; background-clip: padding-box; }
 .view { padding: 22px 22px 48px; max-width: 1500px; margin: 0 auto; animation: viewIn .3s var(--spring); }
@@ -251,7 +249,7 @@ nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; overflo
 /* треки */
 .track-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 2px 18px; }
 .track-list { display: flex; flex-direction: column; gap: 2px; }
-.row { display: flex; align-items: center; gap: 14px; height: 62px; padding: 0 14px 0 8px; border-radius: 16px; cursor: pointer; min-width: 0; transition: background .12s, transform 100ms ease-out; }
+.row { content-visibility: auto; contain-intrinsic-size: auto 62px; display: flex; align-items: center; gap: 14px; height: 62px; padding: 0 14px 0 8px; border-radius: 16px; cursor: pointer; min-width: 0; transition: background .12s, transform 100ms ease-out; }
 .row:hover { background: var(--hover); }
 .row:active { transform: scale(.985); }
 .row.playing { background: linear-gradient(90deg, rgba(185,168,255,.16), rgba(255,159,224,.06) 60%, transparent); box-shadow: inset 0 1px 0 rgba(255,255,255,.08); }
@@ -266,10 +264,10 @@ nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; overflo
 body.is-playing .row.playing .row-overlay .icon-play { display: none; }
 body.is-playing .row.playing .eq { display: flex; }
 .eq { gap: 2px; align-items: flex-end; height: 16px; }
-.eq i { width: 3px; background: #fff; border-radius: 2px; animation: eq .9s ease-in-out infinite; }
+.eq i { width: 3px; height: 16px; background: #fff; border-radius: 2px; transform-origin: 50% 100%; animation: eq .9s ease-in-out infinite; will-change: transform; }
 .eq i:nth-child(2) { animation-delay: -.3s; }
 .eq i:nth-child(3) { animation-delay: -.6s; }
-@keyframes eq { 0%, 100% { height: 4px; } 50% { height: 16px; } }
+@keyframes eq { 0%, 100% { transform: scaleY(.25); } 50% { transform: scaleY(1); } }
 .row-text { flex: 1; min-width: 0; }
 .row-title, .row-artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row-title { font-weight: 650; }
@@ -282,7 +280,8 @@ body.is-playing .row.playing .eq { display: flex; }
 .card-row::-webkit-scrollbar { height: 6px; }
 .card-row::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 3px; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 24px 18px; }
-.card { min-width: 0; cursor: pointer; scroll-snap-align: start; text-align: left; }
+.card { min-width: 0; cursor: pointer; scroll-snap-align: start; text-align: left; content-visibility: auto; contain-intrinsic-size: auto 240px; }
+.section { content-visibility: auto; contain-intrinsic-size: auto 320px; }
 .card:active { transform: scale(.97); }
 .card-cover { position: relative; aspect-ratio: 1; border-radius: 20px; overflow: hidden; background: linear-gradient(135deg, rgba(255,255,255,.12), rgba(255,255,255,.04)); box-shadow: 0 14px 30px rgba(0,0,0,.35); transition: transform .3s var(--spring), box-shadow .3s; }
 /* блик глянцевой «пластинки» */
@@ -377,13 +376,13 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:active::-we
 /* --- Полноэкранный плеер: лист, который выезжает из панели и тянется вниз --- */
 .fullscreen {
   position: fixed; inset: var(--titlebar) 0 0 0; z-index: 30; display: flex; flex-direction: column; overflow: hidden;
-  background: rgba(9, 9, 16, .86); backdrop-filter: blur(48px) saturate(170%);
+  background: rgba(9, 9, 16, .94);
   border-radius: 30px 30px 0 0; border-top: 1px solid rgba(255,255,255,.18);
   box-shadow: 0 -20px 60px rgba(0,0,0,.5);
   will-change: transform; touch-action: none;
 }
 /* своя подсветка обложкой внутри листа */
-.fs-glow { position: absolute; inset: -20%; background-size: cover; background-position: center; filter: blur(110px) saturate(1.8) brightness(.55); opacity: .75; pointer-events: none; transition: background-image .8s; }
+.fs-glow { position: absolute; inset: -10%; background-size: cover; background-position: center; filter: blur(30px) saturate(1.8) brightness(.55); opacity: .75; pointer-events: none; }
 .fs-top, .fs-body { position: relative; }
 .fs-glow::after { content: ""; position: absolute; inset: 0; background: rgba(9, 9, 16, .5); }
 .fs-title, .fs-artist { text-shadow: 0 2px 18px rgba(0, 0, 0, .55); }
@@ -487,3 +486,9 @@ body:not(.is-playing) .fs-cover { transform: scale(.92); }
   .glass, .heavy { background: #101018; border-color: rgba(255,255,255,.5); }
   :root { --muted: rgba(240,242,250,.85); --faint: rgba(240,242,250,.6); }
 }
+
+/* --- Экономия: под открытым полноэкранным плеером интерфейс не рисуется --- */
+body.fs-covered .app, body.fs-covered .ambient { visibility: hidden; }
+
+/* --- Экономия: окно свёрнуто — все анимации на паузе --- */
+body.paused *, body.paused *::before, body.paused *::after { animation-play-state: paused !important; }

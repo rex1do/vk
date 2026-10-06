@@ -19,6 +19,9 @@ const API_HOST = 'https://web.api.vk.ru';
 const API_VERSION = '5.289';
 const WEB_CLIENT_ID = '6287487'; // клиент самого сайта vk.com
 const VK_PARTITION = 'persist:vk';
+// Лёгкая страница того же сайта: после получения токена держим невидимую вкладку на ней,
+// а не на тяжёлом vk.com/audio — меньше памяти и процессора, запросы работают так же
+const VK_PARKING = 'https://vk.ru/robots.txt';
 
 // Сайт должен видеть обычный Chrome, без «Electron/…» и имени программы
 app.userAgentFallback = app.userAgentFallback
@@ -38,6 +41,22 @@ let token = null; // актуальный токен страницы ВК (ан
 let tokenWaiters = [];
 let loginMode = false;
 let loggedIn = null;
+let parkTimer = null;
+
+function parkVkView() {
+  clearTimeout(parkTimer);
+  parkTimer = setTimeout(() => {
+    if (loginMode || !vkView || vkView.webContents.isDestroyed()) return;
+    if (!vkView.webContents.getURL().startsWith(VK_PARKING)) vkView.webContents.loadURL(VK_PARKING);
+  }, 4000);
+}
+
+function wakeVkView() {
+  // Страница ВК сама получает свежий токен при загрузке
+  clearTimeout(parkTimer);
+  token = null;
+  vkView.webContents.loadURL(VK_HOME);
+}
 
 // --- Настройки окна ------------------------------------------------------------------------
 
@@ -84,7 +103,9 @@ function showWindow() {
 // --- Токен и вход --------------------------------------------------------------------------
 
 function setToken(value) {
-  if (!value || value === token) return;
+  if (!value) return;
+  if (!loginMode) parkVkView();
+  if (value === token) return;
   token = value;
   const waiters = tokenWaiters;
   tokenWaiters = [];
@@ -107,8 +128,8 @@ function waitForToken(timeoutMs = 20000) {
 
 function watchToken(ses) {
   // Страница ВК сама получает и обновляет токен — берём его из её запросов к API
-  ses.webRequest.onBeforeRequest({ urls: ['https://*.vk.ru/*', 'https://*.vk.com/*'] }, (details, callback) => {
-    if (details.uploadData && /web\.api\.vk\.(ru|com)\/method\//.test(details.url)) {
+  ses.webRequest.onBeforeRequest({ urls: ['https://web.api.vk.ru/method/*', 'https://web.api.vk.com/method/*'] }, (details, callback) => {
+    if (details.uploadData) {
       const body = details.uploadData.map((part) => (part.bytes ? part.bytes.toString() : '')).join('');
       const match = body.match(/(?:^|&)access_token=([^&]+)/);
       if (match) setToken(decodeURIComponent(match[1]));
@@ -127,7 +148,7 @@ function showLogin(rect) {
 function finishLogin() {
   loginMode = false;
   vkView.setVisible(false);
-  vkView.webContents.loadURL(VK_HOME);
+  wakeVkView();
   sendToShell('login-closed');
   showWindow();
 }
@@ -135,14 +156,13 @@ function finishLogin() {
 function cancelLogin() {
   loginMode = false;
   vkView.setVisible(false);
-  vkView.webContents.loadURL(VK_HOME);
+  wakeVkView();
 }
 
 async function logout() {
   await session.fromPartition(VK_PARTITION).clearStorageData();
-  token = null;
   loggedIn = null;
-  vkView.webContents.loadURL(VK_HOME);
+  wakeVkView();
   sendToShell('auth-changed', { loggedIn: false });
 }
 
@@ -171,8 +191,7 @@ async function callApi(method, params = {}, retry = true) {
   if (data.error) {
     // Токен протух — перезагружаем страницу ВК, она получит новый, и повторяем
     if (retry && [5, 1114, 1116].includes(data.error.error_code)) {
-      token = null;
-      vkView.webContents.loadURL(VK_HOME);
+      wakeVkView();
       return callApi(method, params, false);
     }
     const err = new Error(data.error.error_msg || 'Ошибка ВКонтакте');
@@ -224,8 +243,9 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: false,
+      backgroundThrottling: true, // невидимой странице таймеры на полной скорости не нужны
       autoplayPolicy: 'user-gesture-required', // страница ВК ничего не играет сама
+      spellcheck: false,
     },
   });
   vkView.setBackgroundColor('#141414');
@@ -246,6 +266,10 @@ function createWindow() {
   const sendWindowState = () => sendToShell('window-state', { maximized: win.isMaximized() });
   win.on('maximize', sendWindowState);
   win.on('unmaximize', sendWindowState);
+  // Окно свёрнуто или убрано в трей — интерфейс ставит анимации на паузу (музыка играет).
+  // Page Visibility API тут не поможет: при backgroundThrottling: false страница всегда «видима».
+  const sendVisibility = () => sendToShell('window-visible', win.isVisible() && !win.isMinimized());
+  for (const event of ['hide', 'show', 'minimize', 'restore']) win.on(event, sendVisibility);
   if (settings.maximized) win.maximize();
   shellView.webContents.once('did-finish-load', () => win.show());
 
@@ -287,7 +311,7 @@ function setupVkView(wc) {
   });
   // После входа ВК уводит в ленту — нам она не нужна, держим страницу на музыке
   wc.on('did-navigate', (_e, url) => {
-    if (!loginMode && !/\/audio/.test(url) && /^https:\/\/(www\.)?vk\.(com|ru)\//.test(url)) wc.loadURL(VK_HOME);
+    if (!loginMode && !/\/audio/.test(url) && !url.startsWith(VK_PARKING) && /^https:\/\/(www\.)?vk\.(com|ru)\//.test(url)) wc.loadURL(VK_HOME);
   });
 }
 
