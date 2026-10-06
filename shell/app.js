@@ -68,13 +68,13 @@ const CACHEABLE = /^(catalog\.|audio\.(get|getPlaylists|getPlaylistById|getRecom
 const apiCache = new Map();
 const CACHE_TTL = 3 * 60 * 1000;
 
-async function vk(method, params = {}, { cache = CACHEABLE.test(method) } = {}) {
-  const key = cache ? method + JSON.stringify(params) : null;
+async function vk(method, params = {}, { cache = CACHEABLE.test(method), anonymous = false } = {}) {
+  const key = cache ? (anonymous ? 'anon:' : '') + method + JSON.stringify(params) : null;
   if (key) {
     const hit = apiCache.get(key);
     if (hit && Date.now() - hit.time < CACHE_TTL) return hit.promise;
   }
-  const promise = bridge.api(method, params).then((res) => {
+  const promise = bridge.api(method, params, { anonymous }).then((res) => {
     if (!res.ok) {
       const err = new Error(res.error || 'Ошибка ВКонтакте');
       err.code = res.code;
@@ -186,22 +186,62 @@ const targetOf = (u) => {
     return '';
   }
 };
-async function catalogByUrl(url) {
-  const resp = await vk('catalog.getAudio', { url, need_blocks: 1 });
+// Ищем раздел в ответе catalog.getAudio: вкладка с этим адресом, блок с этим адресом
+// или заголовок блока с подходящим названием — и открываем его «Показать все»
+async function findSection(resp, url, titleRe, anonymous) {
   const want = targetOf(url);
   const sections = (resp.catalog && resp.catalog.sections) || [];
+  const open = async (id) => parseCatalog(await vk('catalog.getSection', { section_id: id }, { anonymous }));
   const exact = sections.find((s) => targetOf(s.url) === want);
-  if (exact) return parseCatalog(resp, exact);
+  if (exact) return exact.blocks && exact.blocks.length ? parseCatalog(resp, exact) : open(exact.id);
   for (const sec of sections) {
     for (const b of sec.blocks || []) {
       const showAll = b.meta && b.meta.show_all_info && b.meta.show_all_info.section_id;
-      if (showAll && targetOf(b.url) === want) return parseCatalog(await vk('catalog.getSection', { section_id: showAll }));
+      if (showAll && targetOf(b.url) === want) return open(showAll);
       for (const a of b.actions || []) {
-        if (a.section_id && a.action && targetOf(a.action.url) === want) return parseCatalog(await vk('catalog.getSection', { section_id: a.section_id }));
+        if (a.section_id && a.action && targetOf(a.action.url) === want) return open(a.section_id);
       }
     }
   }
-  if (sections.length <= 1) return parseCatalog(resp);
+  if (titleRe) {
+    for (const sec of sections) {
+      for (const b of sec.blocks || []) {
+        const title = (b.layout && b.layout.title) || b.title || '';
+        const action = (b.actions || []).find((a) => a.section_id);
+        if (action && titleRe.test(title)) return open(action.section_id);
+      }
+    }
+  }
+  return null;
+}
+
+// Раздел по адресу ВК. Для вошедшего пользователя ВК отвечает набором вкладок,
+// поэтому пробуем по очереди: сам адрес → вкладку «Обзор» → публичный каталог (как у гостя).
+async function catalogByUrl(url, titleRe) {
+  const attempts = [
+    () => vk('catalog.getAudio', { url, need_blocks: 1 }).then((r) => findSection(r, url, titleRe, false)),
+  ];
+  if (auth.loggedIn) {
+    attempts.push(() => vk('catalog.getAudio', { url: 'https://vk.ru/audio?section=explore', need_blocks: 1 }).then((r) => findSection(r, url, titleRe, false)));
+    attempts.push(async () => {
+      const resp = await vk('catalog.getAudio', { url, need_blocks: 1 }, { anonymous: true });
+      const data = (await findSection(resp, url, titleRe, true)) || parseCatalog(resp);
+      // у гостевого каталога ссылки — 30-секундные отрывки; полные ссылки плеер возьмёт по аккаунту
+      data.blocks.forEach((b) => (b.tracks || []).forEach((t) => { t.url = ''; }));
+      data.anonymous = true;
+      return data;
+    });
+  } else {
+    attempts.push(async () => parseCatalog(await vk('catalog.getAudio', { url, need_blocks: 1 })));
+  }
+  for (const attempt of attempts) {
+    try {
+      const data = await attempt();
+      if (data && data.blocks.some((b) => b.kind === 'tracks' || b.kind === 'playlists')) return data;
+    } catch {
+      /* следующий способ */
+    }
+  }
   return null;
 }
 
@@ -294,25 +334,62 @@ function trackRow(track, list, index, { number = false } = {}) {
   return row;
 }
 
-// Имена артистов — ссылки на их страницы
-function artistLine(track, cls) {
-  const line = el('div', { class: cls });
+function normArtist(a) {
+  return { id: a.id, name: a.name, photo: artistPhoto(a, 200) };
+}
+
+async function searchArtists(q, count = 5) {
+  try {
+    const resp = await vk('audio.searchArtists', { q, count });
+    return (resp.items || resp || []).filter((a) => a && a.id && a.name).map(normArtist);
+  } catch {
+    return [];
+  }
+}
+
+function openArtist(a) {
+  if (sheet.open) sheet.hide();
+  closeSuggest();
+  router.go('artist', { id: a.id, name: a.name });
+}
+
+// У трека нет ID артиста — находим артиста по имени
+async function openArtistByName(name) {
+  const clean = name.split(/,|&| feat\.| ft\.| x /i)[0].trim();
+  const found = await searchArtists(clean, 3);
+  const exact = found.find((a) => a.name.toLowerCase() === clean.toLowerCase()) || found[0];
+  if (exact) openArtist(exact);
+  else {
+    if (sheet.open) sheet.hide();
+    searchInput.value = clean;
+    runSearch(clean);
+  }
+}
+
+// Имена артистов — ссылки на их страницы (в списках, в плеере и в полноэкранном режиме)
+function artistLine(track, cls, node = null) {
+  const line = node || el('div', { class: cls });
+  line.replaceChildren();
+  if (!track) return line;
   if (!track.artists.length) {
-    line.textContent = track.artist;
+    line.append(el('span', {
+      class: 'artist-link', text: track.artist,
+      onclick: (e) => { e.stopPropagation(); openArtistByName(track.artist); },
+    }));
     return line;
   }
   track.artists.forEach((a, i) => {
     if (i) line.append(', ');
     line.append(el('span', {
       class: 'artist-link', text: a.name,
-      onclick: (e) => { e.stopPropagation(); router.go('artist', { id: a.id, name: a.name }); },
+      onclick: (e) => { e.stopPropagation(); openArtist(a); },
     }));
   });
   return line;
 }
 
 function artistChip(a) {
-  return el('button', { class: 'artist-chip', onclick: () => router.go('artist', { id: a.id, name: a.name }) },
+  return el('button', { class: 'artist-chip', onclick: () => openArtist(a) },
     el('div', { class: 'artist-chip-photo' }, a.photo ? el('img', { src: a.photo, alt: '', loading: 'lazy' }) : el('span', { html: ICON.user })),
     el('div', { class: 'artist-chip-name', text: a.name }));
 }
@@ -471,15 +548,15 @@ async function viewArtist({ id, name }) {
   ];
 }
 
-async function viewCatalogList(url, eyebrow, title) {
-  const data = await catalogByUrl(url);
+async function viewCatalogList(url, eyebrow, title, titleRe) {
+  const data = await catalogByUrl(url, titleRe);
   if (!data) throw new Error('ВКонтакте не отдал этот раздел');
   const block = data.blocks.find((b) => b.kind === 'tracks');
   if (!block) return [pageHead(eyebrow, title), renderBlocks(data.blocks)];
   const tracks = block.tracks;
   return [
     pageHead(eyebrow, title, tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
-    pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom),
+    data.anonymous ? trackList(tracks) : pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom),
   ];
 }
 
@@ -522,7 +599,7 @@ async function viewRecs() {
   } catch {
     /* попробуем раздел рекомендаций */
   }
-  const data = await catalogByUrl('https://vk.ru/audio?section=recoms');
+  const data = await catalogByUrl('https://vk.ru/audio?section=recoms', /для вас|рекоменд/i);
   if (!data || !data.blocks.length) throw new Error('ВКонтакте пока не подобрал рекомендации');
   const all = data.blocks.filter((b) => b.kind === 'tracks').flatMap((b) => b.tracks);
   return [pageHead('Подобрано алгоритмами', 'Для вас', null, all.length ? playButtons(() => all) : []), renderBlocks(data.blocks)];
@@ -587,7 +664,13 @@ async function viewSearch(query) {
     const resp = await vk('audio.search', { q: query, count: 100, auto_complete: 1 });
     blocks = [{ kind: 'tracks', title: 'Треки', layout: 'list', tracks: (resp.items || []).map(normTrack) }, ...blocks.filter((b) => b.kind !== 'tracks')];
   }
+  if (!blocks.some((b) => b.kind === 'artists')) {
+    const artists = await searchArtists(query, 10);
+    if (artists.length) blocks.unshift({ kind: 'artists', title: 'Артисты', items: artists });
+  }
   const head = pageHead('Поиск', `«${query}»`);
+  // артисты — первым блоком
+  blocks.sort((a, b) => (a.kind === 'artists' ? -1 : 0) - (b.kind === 'artists' ? -1 : 0));
   if (!blocks.some((b) => (b.tracks || b.items || []).length)) {
     return [head, el('div', { class: 'state' }, el('div', { class: 'state-title', text: 'Ничего не нашлось' }), 'Попробуйте написать иначе.')];
   }
@@ -603,8 +686,8 @@ const ROUTES = {
   my: viewMy,
   recs: viewRecs,
   playlists: viewPlaylists,
-  chart: () => viewCatalogList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт'),
-  new: () => viewCatalogList('https://vk.ru/audio?block=new_songs', 'Открыть новое', 'Новинки'),
+  chart: () => viewCatalogList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт', /чарт|chart/i),
+  new: () => viewCatalogList('https://vk.ru/audio?block=new_songs', 'Открыть новое', 'Новинки', /новинки|новые треки|new releases|new songs/i),
   section: viewSection,
   playlist: viewPlaylist,
   search: viewSearch,
@@ -720,23 +803,24 @@ async function updateSuggest() {
     suggest.hidden = false;
     return;
   }
-  let items = suggestCache.get(q.toLowerCase());
-  if (!items) {
-    try {
-      const resp = await vk('audio.search', { q, count: 7, auto_complete: 1 });
-      items = (resp.items || []).map(normTrack);
-      suggestCache.set(q.toLowerCase(), items);
-      if (suggestCache.size > 100) suggestCache.delete(suggestCache.keys().next().value);
-    } catch {
-      items = []; // покажем хотя бы строку поиска
-    }
+  let cached = suggestCache.get(q.toLowerCase());
+  if (!cached) {
+    const [items, found] = await Promise.all([
+      vk('audio.search', { q, count: 7, auto_complete: 1 }).then((r) => (r.items || []).map(normTrack)).catch(() => []),
+      searchArtists(q, 3),
+    ]);
+    cached = { items, found };
+    suggestCache.set(q.toLowerCase(), cached);
+    if (suggestCache.size > 100) suggestCache.delete(suggestCache.keys().next().value);
   }
   if (token !== suggestToken) return;
+  const { items } = cached;
+  // артисты: из поиска артистов, а если он пуст — из найденных треков
   const seenArtists = new Set();
-  const artists = items.flatMap((t) => t.artists).filter((a) => {
-    if (seenArtists.has(a.id)) return false;
-    seenArtists.add(a.id);
-    return a.name.toLowerCase().includes(q.toLowerCase().split(' ')[0]);
+  const artists = [...cached.found, ...items.flatMap((t) => t.artists)].filter((a) => {
+    if (seenArtists.has(String(a.id))) return false;
+    seenArtists.add(String(a.id));
+    return true;
   }).slice(0, 3);
   const nodes = [
     el('button', { class: 'suggest-item', onclick: () => runSearch(q) },
@@ -745,8 +829,8 @@ async function updateSuggest() {
   ];
   if (artists.length) {
     nodes.push(el('div', { class: 'suggest-head', text: 'Артисты' }));
-    artists.forEach((a) => nodes.push(el('button', { class: 'suggest-item', onclick: () => { closeSuggest(); searchInput.blur(); router.go('artist', { id: a.id, name: a.name }); } },
-      el('span', { class: 's-icon', html: ICON.user }),
+    artists.forEach((a) => nodes.push(el('button', { class: 'suggest-item', onclick: () => { searchInput.blur(); openArtist(a); } },
+      a.photo ? el('img', { src: a.photo, alt: '', style: 'border-radius:50%' }) : el('span', { class: 's-icon', html: ICON.user }),
       el('span', { class: 's-text' }, el('div', { class: 's-title', text: a.name }), el('div', { class: 's-sub', text: 'Артист' })))));
   }
   if (items.length) {
@@ -1046,7 +1130,8 @@ function renderNowPlaying() {
   const t = player.current;
   $('#player').classList.toggle('idle', !t);
   $('#bar-title').textContent = t ? t.title : 'Ничего не играет';
-  $('#bar-artist').textContent = t ? t.artist : 'Выберите трек';
+  if (t) artistLine(t, '', $('#bar-artist'));
+  else $('#bar-artist').textContent = 'Выберите трек';
   const small = t ? t.cover(135) : '';
   const big = t ? t.cover(1200) || t.cover(600) : '';
   const barImg = $('#bar-cover img');
@@ -1054,7 +1139,8 @@ function renderNowPlaying() {
   const fsImg = $('#fs-cover img');
   if (big) fsImg.src = big; else fsImg.removeAttribute('src');
   $('#fs-title').textContent = t ? t.title : '';
-  $('#fs-artist').textContent = t ? t.artist : '';
+  artistLine(t, '', $('#fs-artist'));
+  lyrics.trackChanged();
   const tiny = t ? t.cover(68) : '';
   setAmbient(tiny);
   $('#fs-glow').style.backgroundImage = tiny ? `url("${tiny.replace(/"/g, '%22')}")` : 'none';
@@ -1115,6 +1201,7 @@ function renderProgress() {
     }
     const durText = fmt(d);
     if (durText !== lastDurText) { lastDurText = durText; durEls.forEach((n) => { n.textContent = durText; }); }
+    if (sheet.open) lyrics.update();
   });
 }
 seekEls.forEach((s) => {
@@ -1183,6 +1270,103 @@ if ('mediaSession' in navigator) {
   ms.setActionHandler('seekto', (d) => { audio.currentTime = d.seekTime; });
 }
 
+// --- Текст песни ---------------------------------------------------------------------------
+
+const lyricsBox = $('#fs-lyrics');
+const lyrics = {
+  key: null,      // для какого трека загружен текст
+  lines: [],      // [{ time, text, node }]
+  synced: false,
+  active: -1,
+  loading: false,
+
+  trackChanged() {
+    this.key = null;
+    this.lines = [];
+    this.active = -1;
+    if (sheet.open) this.load();
+  },
+
+  parse(resp, duration) {
+    const l = (resp && (resp.lyrics || resp)) || {};
+    const stamps = l.timestamps || l.lines || [];
+    if (Array.isArray(stamps) && stamps.length && stamps[0] && ('begin' in stamps[0] || 'time' in stamps[0])) {
+      let lines = stamps.map((x) => ({ time: Number(x.begin ?? x.time ?? 0), text: String(x.line ?? x.text ?? '') }));
+      // ВК отдаёт время в миллисекундах; если похоже на секунды — оставляем
+      const maxTime = Math.max(...lines.map((x) => x.time));
+      if (maxTime > (duration || 600) + 30) lines = lines.map((x) => ({ ...x, time: x.time / 1000 }));
+      return { synced: true, lines };
+    }
+    const text = Array.isArray(l.text) ? l.text : typeof l.text === 'string' ? l.text.split('\n') : null;
+    if (text && text.some((x) => x.trim())) return { synced: false, lines: text.map((t) => ({ time: 0, text: t })) };
+    return null;
+  },
+
+  async load() {
+    const t = player.current;
+    if (!t || this.key === t.key || this.loading) return;
+    this.key = t.key;
+    this.loading = true;
+    lyricsBox.className = 'fs-lyrics empty';
+    lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Загружаем текст…' }));
+    let parsed = null;
+    if (auth.loggedIn) {
+      try {
+        parsed = this.parse(await vk('audio.getLyrics', { audio_id: t.key }), t.duration);
+      } catch {
+        parsed = null;
+      }
+    }
+    this.loading = false;
+    if (!player.current || player.current.key !== t.key) { this.key = null; return this.load(); }
+    if (!parsed) {
+      this.lines = [];
+      lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: auth.loggedIn ? 'Для этого трека нет текста' : 'Тексты песен доступны после входа' }));
+      return;
+    }
+    this.synced = parsed.synced;
+    this.active = -1;
+    lyricsBox.className = 'fs-lyrics ' + (parsed.synced ? 'synced' : 'plain');
+    this.lines = parsed.lines.map((line) => ({
+      ...line,
+      node: el('div', {
+        class: 'lyric', text: line.text || '♪',
+        onclick: parsed.synced ? () => { audio.currentTime = line.time; this.update(true); } : null,
+      }),
+    }));
+    lyricsBox.replaceChildren(...this.lines.map((l) => l.node));
+    lyricsBox.scrollTop = 0;
+    this.update(true);
+  },
+
+  // подсветка текущей строки и плавная прокрутка к ней
+  update(force = false) {
+    if (!this.synced || !this.lines.length || fs.hidden) return;
+    const now = audio.currentTime + 0.25;
+    let idx = -1;
+    for (let i = 0; i < this.lines.length; i++) if (this.lines[i].time <= now) idx = i; else break;
+    if (idx === this.active && !force) return;
+    this.lines.forEach((l, i) => {
+      l.node.classList.toggle('active', i === idx);
+      l.node.classList.toggle('past', i < idx);
+    });
+    this.active = idx;
+    const target = this.lines[Math.max(idx, 0)].node;
+    lyricsBox.scrollTo({ top: target.offsetTop - lyricsBox.clientHeight * 0.38, behavior: force ? 'auto' : 'smooth' });
+  },
+};
+
+// вкладки «Текст» / «Далее»
+$$('[data-fs-tab]').forEach((tab) => tab.addEventListener('click', () => {
+  const name = tab.dataset.fsTab;
+  const already = tab.classList.contains('active');
+  $$('[data-fs-tab]').forEach((t) => t.classList.toggle('active', t === tab));
+  $$('[data-fs-pane]').forEach((p) => { p.hidden = p.dataset.fsPane !== name; });
+  // в узком окне панель открывается поверх обложки; повторный клик — закрыть
+  fs.classList.toggle('panel-open', !(already && fs.classList.contains('panel-open')));
+  if (name === 'lyrics') { lyrics.load(); lyrics.update(true); }
+}));
+
 // --- Полноэкранный плеер: лист с пружинами и жестом ----------------------------------------
 
 const fs = $('#fs');
@@ -1232,6 +1416,7 @@ const sheet = {
     fs.hidden = false;
     this.open = true;
     renderQueue();
+    lyrics.load();
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.set(0); this.cover(true); return; }
     // появляется оттуда, где была нижняя панель
     this.set(window.innerHeight);
@@ -1294,7 +1479,7 @@ const sheet = {
   }
 })();
 
-$('#bar-track').addEventListener('click', () => sheet.show());
+$('#bar-track').addEventListener('click', (e) => { if (!e.target.closest('.artist-link')) sheet.show(); });
 $('#expand').addEventListener('click', () => sheet.show());
 $('#fs-close').addEventListener('click', () => sheet.hide());
 

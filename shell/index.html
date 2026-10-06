@@ -152,7 +152,10 @@
       <button class="icon-btn fs-close" id="fs-close" title="Свернуть (Esc)">
         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
       </button>
-      <div class="fs-caption" id="fs-caption">Сейчас играет</div>
+      <div class="fs-tabs" role="tablist">
+        <button class="fs-tab active" data-fs-tab="lyrics" role="tab">Текст</button>
+        <button class="fs-tab" data-fs-tab="queue" role="tab">Далее</button>
+      </div>
     </div>
     <div class="fs-body">
       <div class="fs-main">
@@ -193,10 +196,10 @@
           <input type="range" class="vol" min="0" max="100" value="80" aria-label="Громкость">
         </div>
       </div>
-      <aside class="fs-queue glass">
-        <div class="fs-queue-title">Далее</div>
-        <div class="fs-queue-list" id="fs-queue"></div>
-      </aside>
+      <div class="fs-panel" id="fs-panel">
+        <div class="fs-lyrics" id="fs-lyrics" data-fs-pane="lyrics"></div>
+        <div class="fs-queue-list" id="fs-queue" data-fs-pane="queue" hidden></div>
+      </div>
     </div>
   </section>
 

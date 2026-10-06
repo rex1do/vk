@@ -175,10 +175,28 @@ function setVkBounds(rect) {
 
 // --- Запросы к API (внутри страницы vk.com) -----------------------------------------------
 
-async function callApi(method, params = {}, retry = true) {
+// Гостевой токен — тот же, что сайт ВК получает для незалогиненных посетителей.
+// Нужен как запасной путь к публичным разделам (чарт, новинки), если для аккаунта
+// ВК не отдал их отдельной вкладкой.
+let anonToken = null;
+async function getAnonToken() {
+  if (anonToken && anonToken.expires * 1000 > Date.now() + 60000) return anonToken.token;
+  const text = await vkView.webContents.executeJavaScript(`(async () => {
+    const body = new URLSearchParams({ client_secret: 'QbYic1K3lEV5kTGiqlq2', client_id: '${WEB_CLIENT_ID}', scopes: 'audio_anonymous,video_anonymous,photos_anonymous,profile_anonymous', isApiOauthAnonymEnabled: 'false', version: '1', app_id: '${WEB_CLIENT_ID}' });
+    const r = await fetch('https://login.vk.ru/?act=get_anonym_token', { method: 'POST', body, credentials: 'include' });
+    return r.text();
+  })()`, true);
+  const data = JSON.parse(text).data;
+  if (!data || !data.access_token) throw new Error('Нет связи с ВКонтакте');
+  anonToken = { token: data.access_token, expires: data.expires || data.expired_at || 0 };
+  return anonToken.token;
+}
+
+async function callApi(method, params = {}, retry = true, { anonymous = false } = {}) {
   if (!/^[a-zA-Z]+\.[a-zA-Z]+$/.test(method)) throw new Error('bad method');
   if (loginMode) throw new Error('Идёт вход во ВКонтакте');
-  const accessToken = await waitForToken();
+  await waitForToken(); // страница ВК должна быть загружена
+  const accessToken = anonymous ? await getAnonToken() : token;
   const body = { lang: 'ru', ...params, access_token: accessToken };
   const script = `(async () => {
     const r = await fetch(${JSON.stringify(`${API_HOST}/method/${method}?v=${API_VERSION}&client_id=${WEB_CLIENT_ID}`)}, {
@@ -191,8 +209,9 @@ async function callApi(method, params = {}, retry = true) {
   if (data.error) {
     // Токен протух — перезагружаем страницу ВК, она получит новый, и повторяем
     if (retry && [5, 1114, 1116].includes(data.error.error_code)) {
-      wakeVkView();
-      return callApi(method, params, false);
+      if (anonymous) anonToken = null;
+      else wakeVkView();
+      return callApi(method, params, false, { anonymous });
     }
     const err = new Error(data.error.error_msg || 'Ошибка ВКонтакте');
     err.code = data.error.error_code;
@@ -317,9 +336,9 @@ function setupVkView(wc) {
 
 // --- Команды из интерфейса -----------------------------------------------------------------
 
-ipcMain.handle('api', async (_e, method, params) => {
+ipcMain.handle('api', async (_e, method, params, options) => {
   try {
-    return { ok: true, data: await callApi(method, params) };
+    return { ok: true, data: await callApi(method, params, true, { anonymous: Boolean(options && options.anonymous) }) };
   } catch (err) {
     return { ok: false, error: err.message, code: err.code };
   }

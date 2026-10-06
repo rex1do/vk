@@ -321,51 +321,74 @@ input[type="range"]:hover::-webkit-slider-thumb, input[type="range"]:active::-we
 .muted .vol-off { display: block; }
 .player.idle .controls, .player.idle .progress, .player.idle #expand { opacity: .4; pointer-events: none; }
 
-/* --- Полноэкранный плеер: лист, который выезжает из панели и тянется вниз --- */
+/* --- Полноэкранный плеер: лист под шапкой, слева обложка, справа текст или очередь --- */
 .fullscreen {
   position: fixed; inset: var(--titlebar) 0 0 0; z-index: 30; display: flex; flex-direction: column; overflow: hidden;
-  background: rgba(9, 9, 16, .94);
-  border-radius: 30px 30px 0 0; border-top: 1px solid rgba(255,255,255,.18);
+  background: #0b0b12;
+  border-radius: 28px 28px 0 0; border-top: 1px solid rgba(255,255,255,.12);
   box-shadow: 0 -20px 60px rgba(0,0,0,.5);
   will-change: transform; touch-action: none;
 }
-/* своя подсветка обложкой внутри листа */
-.fs-glow { position: absolute; inset: -10%; background-size: cover; background-position: center; filter: blur(30px) saturate(1.8) brightness(.55); opacity: .75; pointer-events: none; }
+.fs-glow { position: absolute; inset: -10%; background-size: cover; background-position: center; filter: blur(30px) saturate(1.5) brightness(.6); opacity: .9; pointer-events: none; }
+.fs-glow::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(8,8,14,.35), rgba(8,8,14,.7)); }
 .fs-top, .fs-body { position: relative; }
-.fs-glow::after { content: ""; position: absolute; inset: 0; background: rgba(9, 9, 16, .5); }
-.fs-title, .fs-artist { text-shadow: 0 2px 18px rgba(0, 0, 0, .55); }
-.fs-artist { color: rgba(240, 242, 250, .78); font-weight: 500; letter-spacing: .005em; }
-.fs-top { height: 52px; display: flex; align-items: center; justify-content: center; flex: none; cursor: grab; }
-.fs-grabber { position: absolute; left: 50%; top: 4px; transform: translateX(-50%); width: 140px; height: 22px; display: grid; place-items: center; cursor: grab; }
-.fs-grabber::before { content: ""; width: 44px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.35); }
-.fs-grabber:active { cursor: grabbing; }
-.fs-close { position: absolute; left: 16px; top: 8px; }
-.fs-caption { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; margin-top: 14px; }
-.fs-body { flex: 1; min-height: 0; display: flex; gap: 56px; align-items: center; justify-content: center; padding: 0 48px 28px; }
-.fs-main { display: flex; flex-direction: column; align-items: center; gap: 18px; width: min(460px, 100%); }
+.fs-top { height: 56px; display: flex; align-items: center; justify-content: center; flex: none; cursor: grab; }
+.fs-grabber { position: absolute; left: 50%; top: 4px; transform: translateX(-50%); width: 140px; height: 18px; display: grid; place-items: center; cursor: grab; }
+.fs-grabber::before { content: ""; width: 40px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.3); }
+.fs-close { position: absolute; left: 16px; top: 10px; }
+.fs-tabs { position: absolute; right: 24px; top: 12px; display: flex; gap: 4px; padding: 3px; border-radius: 16px; background: rgba(0,0,0,.25); }
+.fs-tab { height: 30px; padding: 0 16px; border-radius: 13px; color: var(--muted); font-weight: 600; font-size: 13px; }
+.fs-tab:hover { color: var(--text); }
+.fs-tab.active { background: rgba(255,255,255,.16); color: #fff; }
+
+.fs-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 440px) minmax(0, 1fr); gap: 64px; align-items: center; padding: 8px 56px 36px; max-width: 1400px; width: 100%; margin: 0 auto; }
+.fs-main { display: flex; flex-direction: column; align-items: stretch; gap: 16px; min-width: 0; }
 .fs-cover {
-  position: relative; width: min(440px, calc(100vh - 430px), 100%); min-width: 160px; aspect-ratio: 1; border-radius: 34px; overflow: hidden; cursor: grab;
-  background: linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,.04));
-  box-shadow: 0 40px 90px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+  width: 100%; max-width: min(440px, calc(100vh - 420px)); min-width: 180px; aspect-ratio: 1; align-self: center; border-radius: 16px; overflow: hidden; cursor: grab;
+  background: rgba(255,255,255,.08);
+  box-shadow: 0 30px 70px rgba(0,0,0,.5);
   transition: transform .5s var(--spring);
 }
-body:not(.is-playing) .fs-cover { transform: scale(.92); }
+body:not(.is-playing) .fs-cover { transform: scale(.95); }
 .fs-cover img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
-.fs-info { text-align: center; width: 100%; }
-.fs-title { font-size: clamp(22px, 2.6vw, 32px); font-weight: 800; letter-spacing: -.025em; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fs-artist { color: var(--muted); font-size: 17px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fs-info { min-width: 0; margin-top: 6px; }
+.fs-title { font-size: clamp(22px, 2.2vw, 28px); font-weight: 750; letter-spacing: -.02em; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fs-artist { color: rgba(240,242,250,.72); font-size: 16px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fs-progress { width: 100%; }
-.fs-controls { gap: 18px; }
-.icon-btn.big { width: 54px; height: 54px; }
+.fs-controls { justify-content: space-between; gap: 6px; }
+.icon-btn.big { width: 52px; height: 52px; }
 .icon-btn.big svg { width: 26px; height: 26px; }
-.play.big { width: 76px; height: 76px; }
-.play.big svg { width: 32px; height: 32px; }
-.fs-volume input { width: 170px; }
-.fs-queue { width: 350px; max-height: min(640px, 100%); display: flex; flex-direction: column; padding: 16px 10px 10px; flex: none; }
-.fs-queue-title { font-weight: 750; font-size: 18px; letter-spacing: -.01em; padding: 0 12px 10px; }
-.fs-queue-list { overflow-y: auto; min-height: 0; }
-.fs-queue .row { height: 56px; }
-.fs-queue .row-cover { width: 40px; height: 40px; }
+.play.big { width: 64px; height: 64px; }
+.play.big svg { width: 28px; height: 28px; }
+.fs-volume input { flex: 1; width: auto; }
+
+/* правая панель: текст песни или очередь */
+.fs-panel { position: relative; align-self: stretch; min-height: 0; display: flex; flex-direction: column; }
+.fs-lyrics, .fs-queue-list { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; }
+.fs-lyrics::-webkit-scrollbar, .fs-queue-list::-webkit-scrollbar { display: none; }
+.fs-lyrics {
+  padding: 30vh 8px 40vh; font-size: clamp(22px, 2.3vw, 32px); font-weight: 750; line-height: 1.35; letter-spacing: -.015em;
+  mask-image: linear-gradient(180deg, transparent, #000 18%, #000 78%, transparent);
+}
+.lyric { padding: 6px 10px; margin: 2px 0; border-radius: 12px; color: rgba(255,255,255,.32); transition: color .3s ease, transform .3s var(--spring); transform-origin: 0 50%; }
+.fs-lyrics.synced .lyric { cursor: pointer; }
+.fs-lyrics.synced .lyric:hover { color: rgba(255,255,255,.6); }
+.lyric.past { color: rgba(255,255,255,.5); }
+.lyric.active { color: #fff; }
+.fs-lyrics.plain { padding-top: 24px; }
+.fs-lyrics.plain .lyric { color: rgba(255,255,255,.85); font-size: .8em; padding: 2px 10px; }
+.fs-lyrics.empty { padding: 0; display: grid; place-items: center; mask-image: none; }
+.lyric-empty { color: var(--muted); font-size: 18px; font-weight: 600; text-align: center; }
+.fs-queue-list { padding: 4px 0 24px; }
+.fs-queue-list .row { height: 58px; }
+
+/* узкое окно: одна колонка, панель вместо обложки */
+@media (max-width: 980px) {
+  .fs-body { grid-template-columns: 1fr; gap: 16px; padding: 4px 24px 24px; align-items: start; }
+  .fs-panel { position: absolute; inset: 0 24px 24px; display: none; background: #0b0b12; z-index: 2; }
+  .fullscreen.panel-open .fs-panel { display: flex; }
+  .fs-cover { max-width: min(340px, calc(100vh - 430px)); }
+}
 
 /* --- Вход --- */
 .login-modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; background: rgba(4,4,8,.6); backdrop-filter: blur(12px); padding: 24px; animation: fadeIn .2s ease; }
@@ -386,7 +409,6 @@ body:not(.is-playing) .fs-cover { transform: scale(.92); }
 @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 10px) scale(.96); } }
 
 /* --- Адаптивность --- */
-@media (max-width: 1200px) { .fs-queue { display: none; } }
 @media (max-width: 1080px) {
   :root { --side: 68px; }
   .sidebar { padding: 10px 8px; }
@@ -410,7 +432,6 @@ body:not(.is-playing) .fs-cover { transform: scale(.92); }
   .view { padding: 16px 14px 30px; }
   .hero { flex-direction: column; align-items: flex-start; }
   .track-grid { grid-template-columns: 1fr; }
-  .fs-body { padding: 6px 20px 24px; }
 }
 @media (max-width: 760px) {
   .player .volume input, .player .toggle { display: none; }
@@ -435,7 +456,7 @@ body:not(.is-playing) .fs-cover { transform: scale(.92); }
 }
 
 /* --- Экономия: под открытым полноэкранным плеером интерфейс не рисуется --- */
-body.fs-covered .app, body.fs-covered .ambient { visibility: hidden; }
+body.fs-covered .sidebar, body.fs-covered .content, body.fs-covered .player { visibility: hidden; }
 
 /* --- Экономия: окно свёрнуто — все анимации на паузе --- */
 body.paused *, body.paused *::before, body.paused *::after { animation-play-state: paused !important; }

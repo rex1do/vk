@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('vkp', {
   platform: process.platform,
-  api: (method, params) => ipcRenderer.invoke('api', method, params),
+  api: (method, params, options) => ipcRenderer.invoke('api', method, params, options),
   authState: () => ipcRenderer.invoke('auth-state'),
   login: (rect) => ipcRenderer.send('login', rect),
   loginBounds: (rect) => ipcRenderer.send('login-bounds', rect),
