@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import (
-    QAbstractTableModel,
+    QAbstractListModel,
     QModelIndex,
     QObject,
     QRunnable,
@@ -23,32 +23,33 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPixmap, QShortcut
+from PySide6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QFrame,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QSlider,
-    QSplitter,
-    QStyle,
+    QStackedWidget,
     QSystemTrayIcon,
-    QTableView,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from . import stream, vk
+from . import stream, ui, vk
 from .auth import LoginDialog
+from .ui import fmt_time
 
 APP_NAME = "VK Player"
 CACHE_LIMIT = 500 * 1024 * 1024
@@ -78,47 +79,12 @@ def save_session(session: Optional[dict]) -> None:
         session_file().write_text(json.dumps(session), "utf-8")
 
 
-def fmt_time(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-    return f"{seconds // 60}:{seconds % 60:02d}"
-
-
-def media_icon(kind: str, color: str = "#e1e3e6", size: int = 48) -> QIcon:
-    """Рисуем иконки сами: системные почти не видны на тёмной теме."""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(color))
-    s = size / 48
-
-    def triangle(x1, x2, y1=12, y2=36):
-        path = QPainterPath()
-        path.moveTo(x1 * s, y1 * s)
-        path.lineTo(x2 * s, (y1 + y2) / 2 * s)
-        path.lineTo(x1 * s, y2 * s)
-        path.closeSubpath()
-        painter.drawPath(path)
-
-    if kind == "play":
-        triangle(17, 37)
-    elif kind == "pause":
-        painter.drawRoundedRect(int(14 * s), int(12 * s), int(7 * s), int(24 * s), 2 * s, 2 * s)
-        painter.drawRoundedRect(int(27 * s), int(12 * s), int(7 * s), int(24 * s), 2 * s, 2 * s)
-    elif kind == "next":
-        triangle(12, 32)
-        painter.drawRoundedRect(int(32 * s), int(12 * s), int(5 * s), int(24 * s), 2 * s, 2 * s)
-    elif kind == "prev":
-        path = QPainterPath()
-        path.moveTo(36 * s, 12 * s)
-        path.lineTo(16 * s, 24 * s)
-        path.lineTo(36 * s, 36 * s)
-        path.closeSubpath()
-        painter.drawPath(path)
-        painter.drawRoundedRect(int(11 * s), int(12 * s), int(5 * s), int(24 * s), 2 * s, 2 * s)
-    painter.end()
-    return QIcon(pixmap)
+def plural(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
 
 
 # --- Фоновые задачи ---------------------------------------------------------------------------
@@ -169,64 +135,42 @@ def run_bg(fn: Callable, on_done: Optional[Callable] = None, on_fail: Optional[C
     QThreadPool.globalInstance().start(_Task(fn, on_done, on_fail))
 
 
-# --- Таблица треков ---------------------------------------------------------------------------
+# --- Список треков ----------------------------------------------------------------------------
 
 
-class TrackModel(QAbstractTableModel):
-    HEADERS = ["", "Исполнитель", "Название", "Время"]
-
+class TrackModel(QAbstractListModel):
     def __init__(self):
         super().__init__()
         self.tracks: list[vk.Track] = []
-        self.playing_key: Optional[str] = None
 
     def set_tracks(self, tracks: list[vk.Track]) -> None:
         self.beginResetModel()
         self.tracks = tracks
         self.endResetModel()
 
-    def set_playing(self, key: Optional[str]) -> None:
-        self.playing_key = key
-        if self.tracks:
-            self.dataChanged.emit(self.index(0, 0), self.index(len(self.tracks) - 1, 3))
-
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.tracks)
 
-    def columnCount(self, parent=QModelIndex()):
-        return 4
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return self.HEADERS[section]
-        return None
-
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         track = self.tracks[index.row()]
-        col = index.column()
-        playing = track.key == self.playing_key
+        if role == ui.TRACK_ROLE:
+            return track
         if role == Qt.ItemDataRole.DisplayRole:
-            return ["▶" if playing else str(index.row() + 1), track.artist, track.title, fmt_time(track.duration)][col]
-        if role == Qt.ItemDataRole.FontRole and playing:
-            font = QFont()
-            font.setBold(True)
-            return font
-        if role == Qt.ItemDataRole.ForegroundRole and not track.url:
-            return Qt.GlobalColor.gray  # трек недоступен (изъят правообладателем и т.п.)
-        if role == Qt.ItemDataRole.TextAlignmentRole and col in (0, 3):
-            return Qt.AlignmentFlag.AlignCenter
+            return track.name
         if role == Qt.ItemDataRole.ToolTipRole:
-            return track.name if track.url else "Трек недоступен"
+            return track.name if track.url else f"{track.name}\nТрек недоступен"
         return None
 
 
 # --- Главное окно -----------------------------------------------------------------------------
 
 REPEAT_OFF, REPEAT_ALL, REPEAT_ONE = range(3)
+TITLE_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
 class PlayerWindow(QMainWindow):
     SECTION_MY, SECTION_RECS, SECTION_SEARCH = "my", "recs", "search"
+    FIXED_NAV_ITEMS = 4  # три раздела + подпись «Плейлисты»
 
     def __init__(self, session: dict):
         super().__init__()
@@ -243,6 +187,7 @@ class PlayerWindow(QMainWindow):
         self.repeat = int(self.settings.value("repeat", REPEAT_ALL))
         self.dragging = False
         self.failures = 0
+        self.muted_volume = 0
         self.sections: dict[str, list[vk.Track]] = {}
 
         self.player = QMediaPlayer(self)
@@ -256,134 +201,260 @@ class PlayerWindow(QMainWindow):
 
         self.build_ui()
         self.restore_settings()
-        self.statusBar().showMessage(f"Вы вошли как {session.get('name', '')}")
+        self.track_view.setFocus()
         self.load_section(self.SECTION_MY)
         self.load_playlists()
 
     # --- интерфейс ---
 
-    def build_ui(self) -> None:
-        self.setWindowTitle(APP_NAME)
-        self.resize(1000, 650)
-        style = self.style()
+    @staticmethod
+    def tool_button(name: str, tip: str, slot, size: int = 32, icon_size: int = 20, checkable: bool = False) -> QToolButton:
+        b = QToolButton()
+        b.setIcon(ui.icon(name, ui.TEXT))
+        b.setIconSize(QSize(icon_size, icon_size))
+        b.setFixedSize(size, size)
+        b.setToolTip(tip)
+        b.setCheckable(checkable)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(slot)
+        return b
 
-        # Левая колонка: разделы и плейлисты
-        self.search_edit = QLineEdit(placeholderText="Поиск музыки…", clearButtonEnabled=True)
+    def build_sidebar(self) -> QWidget:
+        sidebar = QFrame(objectName="sidebar")
+        sidebar.setFixedWidth(250)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(14, 16, 14, 12)
+        layout.setSpacing(10)
+
+        logo_row = QHBoxLayout()
+        logo_row.setSpacing(10)
+        logo_icon = QLabel()
+        logo_icon.setPixmap(ui.icon_pixmap("logo", size=30))
+        logo_row.addWidget(logo_icon)
+        logo_row.addWidget(QLabel(APP_NAME, objectName="logo"))
+        logo_row.addStretch()
+        layout.addLayout(logo_row)
+        layout.addSpacing(4)
+
+        self.search_edit = QLineEdit(placeholderText="Поиск музыки", clearButtonEnabled=True)
+        self.search_edit.addAction(ui.icon("search", ui.MUTED), QLineEdit.ActionPosition.LeadingPosition)
         self.search_edit.returnPressed.connect(self.do_search)
-        self.nav = QListWidget()
-        for key, title in ((self.SECTION_MY, "Моя музыка"), (self.SECTION_RECS, "Рекомендации"), (self.SECTION_SEARCH, "Поиск")):
-            item = QListWidgetItem(title)
+        layout.addWidget(self.search_edit)
+
+        self.nav = QListWidget(objectName="nav")
+        self.nav.setIconSize(QSize(20, 20))
+        self.nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nav.setCursor(Qt.CursorShape.PointingHandCursor)
+        for key, title, icon_name in (
+            (self.SECTION_MY, "Моя музыка", "music"),
+            (self.SECTION_RECS, "Рекомендации", "sparkle"),
+            (self.SECTION_SEARCH, "Поиск", "search"),
+        ):
+            item = QListWidgetItem(ui.icon(icon_name, ui.TEXT), "  " + title)
             item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setData(TITLE_ROLE, title)
             self.nav.addItem(item)
-        header = QListWidgetItem("Плейлисты")
-        header.setFlags(Qt.ItemFlag.NoItemFlags)
-        font = header.font()
+        caption = QListWidgetItem("ПЛЕЙЛИСТЫ")
+        caption.setFlags(Qt.ItemFlag.NoItemFlags)
+        caption.setForeground(Qt.GlobalColor.gray)
+        font = QFont(caption.font())
+        font.setPointSizeF(max(7.0, self.font().pointSizeF() * 0.8))
         font.setBold(True)
-        header.setFont(font)
-        self.nav.addItem(header)
+        caption.setFont(font)
+        caption.setSizeHint(QSize(0, 44))
+        self.nav.addItem(caption)
         self.nav.itemClicked.connect(self.on_nav)
+        layout.addWidget(self.nav, 1)
 
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(self.search_edit)
-        left_layout.addWidget(self.nav)
+        # Блок аккаунта внизу
+        user_row = QHBoxLayout()
+        user_row.setSpacing(10)
+        avatar = QLabel()
+        name = self.session.get("name", "") or "Аккаунт ВК"
+        avatar.setPixmap(ui.avatar_pixmap(name, 34))
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        names.addWidget(self._name_label(name))
+        names.addWidget(QLabel("ВКонтакте", objectName="userHint"))
+        menu_btn = self.tool_button("more", "Меню", lambda: None)
+        menu = QMenu(self)
+        menu.addAction("Обновить списки", self.refresh, QKeySequence(QKeySequence.StandardKey.Refresh))
+        menu.addAction("Очистить кэш", self.clear_cache)
+        menu.addSeparator()
+        menu.addAction("Выйти из аккаунта", self.logout)
+        menu.addAction("Закрыть программу", self.quit, QKeySequence(QKeySequence.StandardKey.Quit))
+        menu_btn.setMenu(menu)
+        menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.addActions(menu.actions())  # чтобы горячие клавиши работали без открытия меню
+        user_row.addWidget(avatar)
+        user_row.addLayout(names, 1)
+        user_row.addWidget(menu_btn)
+        layout.addLayout(user_row)
+        return sidebar
 
-        # Таблица треков
+    @staticmethod
+    def _name_label(name: str) -> QLabel:
+        label = ui.ElidedLabel(name)
+        label.setObjectName("userName")
+        return label
+
+    def build_content(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(28, 22, 18, 0)
+        layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.page_title = ui.ElidedLabel("Моя музыка")
+        self.page_title.setObjectName("pageTitle")
+        self.page_info = QLabel("", objectName="pageInfo")
+        titles.addWidget(self.page_title)
+        titles.addWidget(self.page_info)
+        header.addLayout(titles, 1)
+
+        self.status_label = ui.ElidedLabel("")
+        self.status_label.setObjectName("status")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.status_timer = QTimer(self, singleShot=True, timeout=lambda: self.status_label.setText(""))
+        header.addWidget(self.status_label, 1)
+
+        self.play_all_btn = QPushButton(ui.icon("play", "#ffffff", 16), " Слушать")
+        self.play_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_all_btn.clicked.connect(lambda: self.play_all(shuffle=False))
+        self.shuffle_all_btn = QPushButton(ui.icon("shuffle", ui.TEXT, 16), " Перемешать", objectName="secondary")
+        self.shuffle_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.shuffle_all_btn.clicked.connect(lambda: self.play_all(shuffle=True))
+        header.addWidget(self.play_all_btn)
+        header.addWidget(self.shuffle_all_btn)
+        layout.addLayout(header)
+
         self.model = TrackModel()
-        self.table = QTableView()
-        self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setShowGrid(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(28)
-        h = self.table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        h.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.doubleClicked.connect(lambda index: self.play_from_view(index.row()))
-        self.table.activated.connect(lambda index: self.play_from_view(index.row()))
+        self.track_view = QListView(objectName="tracks")
+        self.track_view.setModel(self.model)
+        self.track_view.setItemDelegate(ui.TrackDelegate(self, self.track_view))
+        self.track_view.setMouseTracking(True)
+        self.track_view.setUniformItemSizes(True)
+        self.track_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.track_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.track_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.track_view.verticalScrollBar().setSingleStep(24)
+        self.track_view.doubleClicked.connect(lambda index: self.play_from_view(index.row()))
+        self.track_view.activated.connect(lambda index: self.play_from_view(index.row()))
 
-        splitter = QSplitter()
-        splitter.addWidget(left)
-        splitter.addWidget(self.table)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([230, 770])
+        self.empty_label = QLabel("", objectName="empty")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.track_view)
+        self.stack.addWidget(self.empty_label)
+        layout.addWidget(self.stack, 1)
+        return content
 
-        # Нижняя панель управления
-        def button(std, tip, slot, checkable=False, text=None, icon=None):
-            b = QToolButton()
-            if text:
-                b.setText(text)
-            else:
-                b.setIcon(icon or style.standardIcon(std))
-                b.setIconSize(QSize(22, 22))
-            b.setToolTip(tip)
-            b.setCheckable(checkable)
-            b.setAutoRaise(True)
-            b.setMinimumSize(36, 36)
-            b.clicked.connect(slot)
-            return b
+    def build_player_bar(self) -> QWidget:
+        bar = QFrame(objectName="playerBar")
+        bar.setFixedHeight(84)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(16, 10, 20, 10)
 
-        self.prev_btn = button(None, "Предыдущий", self.prev_track, icon=media_icon("prev"))
-        self.play_btn = button(None, "Играть / пауза (пробел)", self.toggle_play, icon=media_icon("play", "#ffffff"))
+        # Слева: обложка и название
+        left = QHBoxLayout()
+        left.setSpacing(12)
+        self.cover_label = QLabel()
+        self.cover_label.setPixmap(ui.cover_pixmap("", 52))
+        texts = QVBoxLayout()
+        texts.setSpacing(2)
+        texts.addStretch()
+        self.title_label = ui.ElidedLabel("Ничего не играет")
+        self.title_label.setObjectName("trackTitle")
+        self.artist_label = ui.ElidedLabel("Выберите трек двойным щелчком")
+        self.artist_label.setObjectName("trackArtist")
+        texts.addWidget(self.title_label)
+        texts.addWidget(self.artist_label)
+        texts.addStretch()
+        left.addWidget(self.cover_label)
+        left.addLayout(texts, 1)
+        left_box = QWidget()
+        left_box.setLayout(left)
+        left_box.setFixedWidth(280)
+
+        # Центр: кнопки и перемотка
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        self.shuffle_btn = self.tool_button("shuffle", "Перемешивать", self.on_shuffle, checkable=True)
+        self.prev_btn = self.tool_button("prev", "Предыдущий (Ctrl+←)", self.prev_track, icon_size=18)
+        self.play_btn = self.tool_button("play", "Играть / пауза (пробел)", self.toggle_play, size=40, icon_size=20)
         self.play_btn.setObjectName("play")
-        self.play_btn.setFixedSize(44, 44)
-        self.next_btn = button(None, "Следующий", self.next_track, icon=media_icon("next"))
-        self.shuffle_btn = button(None, "Перемешать", self.save_settings, checkable=True, text="🔀")
-        self.repeat_btn = button(None, "", self.cycle_repeat, text="🔁")
+        self.play_btn.setIcon(ui.icon("play", ui.BG))
+        self.next_btn = self.tool_button("next", "Следующий (Ctrl+→)", self.next_track, icon_size=18)
+        self.repeat_btn = self.tool_button("repeat", "", self.cycle_repeat)
+        buttons.addStretch()
+        for w in (self.shuffle_btn, self.prev_btn, self.play_btn, self.next_btn, self.repeat_btn):
+            buttons.addWidget(w)
+        buttons.addStretch()
 
-        self.title_label = QLabel("—")
-        self.title_label.setMinimumWidth(200)
-        self.pos_label = QLabel("0:00")
-        self.dur_label = QLabel("0:00")
+        seek_row = QHBoxLayout()
+        seek_row.setSpacing(10)
+        self.pos_label = QLabel("0:00", objectName="time")
+        self.pos_label.setFixedWidth(40)
+        self.pos_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.dur_label = QLabel("0:00", objectName="time")
+        self.dur_label.setFixedWidth(40)
         self.seek = QSlider(Qt.Orientation.Horizontal)
+        self.seek.setCursor(Qt.CursorShape.PointingHandCursor)
         self.seek.sliderPressed.connect(lambda: setattr(self, "dragging", True))
         self.seek.sliderReleased.connect(self.on_seek_released)
         self.seek.sliderMoved.connect(lambda v: self.pos_label.setText(fmt_time(v // 1000)))
-        self.volume = QSlider(Qt.Orientation.Horizontal)
-        self.volume.setRange(0, 100)
-        self.volume.setFixedWidth(110)
-        self.volume.valueChanged.connect(self.on_volume)
-        vol_icon = QLabel()
-        vol_icon.setPixmap(style.standardIcon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(18, 18))
-
-        controls = QHBoxLayout()
-        for w in (self.prev_btn, self.play_btn, self.next_btn, self.shuffle_btn, self.repeat_btn):
-            controls.addWidget(w)
-        controls.addSpacing(10)
-        info = QVBoxLayout()
-        info.addWidget(self.title_label)
-        seek_row = QHBoxLayout()
         seek_row.addWidget(self.pos_label)
         seek_row.addWidget(self.seek, 1)
         seek_row.addWidget(self.dur_label)
-        info.addLayout(seek_row)
-        controls.addLayout(info, 1)
-        controls.addSpacing(10)
-        controls.addWidget(vol_icon)
-        controls.addWidget(self.volume)
+
+        center = QVBoxLayout()
+        center.setSpacing(2)
+        center.addLayout(buttons)
+        center.addLayout(seek_row)
+
+        # Справа: громкость
+        right = QHBoxLayout()
+        right.setSpacing(6)
+        right.addStretch()
+        self.volume_btn = self.tool_button("volume", "Выключить звук", self.toggle_mute)
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setRange(0, 100)
+        self.volume.setFixedWidth(110)
+        self.volume.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.volume.valueChanged.connect(self.on_volume)
+        right.addWidget(self.volume_btn)
+        right.addWidget(self.volume)
+        right_box = QWidget()
+        right_box.setLayout(right)
+        right_box.setFixedWidth(280)
+
+        layout.addWidget(left_box)
+        layout.addLayout(center, 1)
+        layout.addWidget(right_box)
+        return bar
+
+    def build_ui(self) -> None:
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(ui.icon("logo", size=64))
+        self.resize(1180, 740)
+        self.setMinimumSize(960, 560)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self.build_sidebar())
+        body.addWidget(self.build_content(), 1)
 
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(splitter, 1)
-        layout.addLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(body, 1)
+        layout.addWidget(self.build_player_bar())
         self.setCentralWidget(central)
-
-        # Меню
-        menu = self.menuBar().addMenu("Аккаунт")
-        refresh = QAction("Обновить", self, shortcut=QKeySequence(QKeySequence.StandardKey.Refresh), triggered=self.refresh)
-        logout = QAction("Выйти из аккаунта", self, triggered=self.logout)
-        clear = QAction("Очистить кэш", self, triggered=self.clear_cache)
-        quit_action = QAction("Закрыть", self, shortcut=QKeySequence(QKeySequence.StandardKey.Quit), triggered=self.quit)
-        for a in (refresh, clear, logout):
-            menu.addAction(a)
-        menu.addSeparator()
-        menu.addAction(quit_action)
 
         # Горячие клавиши
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self.toggle_play)
@@ -396,7 +467,7 @@ class PlayerWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_MediaPrevious), self, self.prev_track)
 
         # Значок в трее: можно свернуть окно и слушать дальше
-        self.tray = QSystemTrayIcon(self.windowIcon() if not self.windowIcon().isNull() else style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay), self)
+        self.tray = QSystemTrayIcon(ui.icon("logo", size=64), self)
         tray_menu = QMenu(self)
         tray_menu.addAction("Показать", self.show_normal)
         tray_menu.addAction("Играть / пауза", self.toggle_play)
@@ -412,6 +483,12 @@ class PlayerWindow(QMainWindow):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray.show()
 
+    def show_status(self, text: str, timeout: int = 0) -> None:
+        self.status_label.setText(text)
+        self.status_timer.stop()
+        if timeout:
+            self.status_timer.start(timeout)
+
     def show_normal(self) -> None:
         self.showNormal()
         self.raise_()
@@ -419,7 +496,9 @@ class PlayerWindow(QMainWindow):
 
     def restore_settings(self) -> None:
         self.volume.setValue(int(self.settings.value("volume", 70)))
+        self.on_volume(self.volume.value())
         self.shuffle_btn.setChecked(self.settings.value("shuffle", "false") in (True, "true"))
+        self.on_shuffle()
         geometry = self.settings.value("geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -430,6 +509,38 @@ class PlayerWindow(QMainWindow):
         self.settings.setValue("shuffle", self.shuffle_btn.isChecked())
         self.settings.setValue("repeat", self.repeat)
         self.settings.setValue("geometry", self.saveGeometry())
+
+    def on_shuffle(self) -> None:
+        on = self.shuffle_btn.isChecked()
+        self.shuffle_btn.setIcon(ui.icon("shuffle", ui.ACCENT if on else ui.MUTED))
+        self.shuffle_btn.setToolTip("Перемешивание включено" if on else "Перемешивание выключено")
+        self.save_settings()
+
+    def toggle_mute(self) -> None:
+        if self.volume.value() > 0:
+            self.muted_volume = self.volume.value()
+            self.volume.setValue(0)
+        else:
+            self.volume.setValue(self.muted_volume or 50)
+
+    def set_now_playing(self, track: vk.Track) -> None:
+        self.title_label.setText(track.title)
+        self.artist_label.setText(track.artist)
+        self.cover_label.setPixmap(ui.cover_pixmap(track.artist or track.title, 52))
+        self.setWindowTitle(f"{track.name} — {APP_NAME}")
+        self.tray.setToolTip(track.name)
+        self.track_view.viewport().update()
+
+    def is_playing(self) -> bool:
+        return self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+    def play_all(self, shuffle: bool) -> None:
+        if not self.model.tracks:
+            return
+        self.shuffle_btn.setChecked(shuffle)
+        self.on_shuffle()
+        start = random.randrange(len(self.model.tracks)) if shuffle else 0
+        self.play_from_view(start)
 
     # --- разделы и загрузка списков ---
 
@@ -458,8 +569,25 @@ class PlayerWindow(QMainWindow):
 
     def show_tracks(self, tracks: list[vk.Track]) -> None:
         self.model.set_tracks(tracks)
-        self.model.set_playing(self.current.key if self.current else None)
-        self.table.scrollToTop()
+        self.track_view.scrollToTop()
+        item = self.nav.currentItem()
+        self.page_title.setText(item.data(TITLE_ROLE) if item else "")
+        if tracks:
+            total = sum(t.duration for t in tracks)
+            hours, minutes = total // 3600, total % 3600 // 60
+            length = f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
+            self.page_info.setText(f"{len(tracks)} {plural(len(tracks), 'трек', 'трека', 'треков')} · {length}")
+            self.stack.setCurrentWidget(self.track_view)
+        else:
+            self.page_info.setText("")
+            empty = "Введите запрос в поиске слева" if self.current_nav_key() == self.SECTION_SEARCH else "Здесь пока пусто"
+            self.show_empty(empty)
+        self.play_all_btn.setEnabled(bool(tracks))
+        self.shuffle_all_btn.setEnabled(bool(tracks))
+
+    def show_empty(self, text: str) -> None:
+        self.empty_label.setText(text)
+        self.stack.setCurrentWidget(self.empty_label)
 
     def load_section(self, key: str, playlist: Optional[vk.Playlist] = None, force: bool = False) -> None:
         if key in self.sections and not force:
@@ -472,23 +600,27 @@ class PlayerWindow(QMainWindow):
             loader = lambda: self.api.audio(playlist.owner_id, playlist.id, playlist.access_key)
         else:
             loader = loaders[key]
-        self.statusBar().showMessage("Загрузка…")
+        item = self.nav.currentItem()
+        self.page_title.setText(item.data(TITLE_ROLE) if item else "")
+        self.page_info.setText("")
         self.model.set_tracks([])
+        self.show_empty("Загрузка…")
 
         def done(tracks):
             self.sections[key] = tracks
             if self.current_nav_key() == key:
                 self.show_tracks(tracks)
-            self.statusBar().showMessage(f"Треков: {len(tracks)}", 4000)
 
         run_bg(loader, done, self.on_api_error)
 
     def load_playlists(self) -> None:
         def done(playlists: list[vk.Playlist]):
-            while self.nav.count() > 4:
-                self.nav.takeItem(4)
+            while self.nav.count() > self.FIXED_NAV_ITEMS:
+                self.nav.takeItem(self.FIXED_NAV_ITEMS)
             for p in playlists:
-                item = QListWidgetItem(f"{p.title}  ({p.count})")
+                item = QListWidgetItem(ui.icon("playlist", ui.MUTED), "  " + p.title)
+                item.setData(TITLE_ROLE, p.title)
+                item.setToolTip(f"{p.title} — {p.count} {plural(p.count, 'трек', 'трека', 'треков')}")
                 item.setData(Qt.ItemDataRole.UserRole, f"pl{p.owner_id}_{p.id}")
                 item.setData(Qt.ItemDataRole.UserRole + 1, p)
                 self.nav.addItem(item)
@@ -501,13 +633,17 @@ class PlayerWindow(QMainWindow):
             return
         self.select_nav(self.SECTION_SEARCH)
         self.model.set_tracks([])
-        self.statusBar().showMessage(f"Ищу «{query}»…")
+        self.page_title.setText(f"Поиск: {query}")
+        self.page_info.setText("")
+        self.show_empty("Ищу…")
 
         def done(tracks):
             self.sections[self.SECTION_SEARCH] = tracks
             if self.current_nav_key() == self.SECTION_SEARCH:
                 self.show_tracks(tracks)
-            self.statusBar().showMessage(f"Найдено: {len(tracks)}", 4000)
+                self.page_title.setText(f"Поиск: {query}")
+                if not tracks:
+                    self.show_empty("Ничего не нашлось")
 
         run_bg(lambda: self.api.search(query), done, self.on_api_error)
 
@@ -526,7 +662,7 @@ class PlayerWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "Сессия ВК истекла, войдите снова.")
             self.logout()
             return
-        self.statusBar().showMessage(f"Ошибка: {error}", 8000)
+        self.show_status(f"Ошибка: {error}", 8000)
 
     # --- воспроизведение ---
 
@@ -541,10 +677,7 @@ class PlayerWindow(QMainWindow):
         track = self.queue[index]
         self.queue_pos = index
         self.current = track
-        self.model.set_playing(track.key)
-        self.title_label.setText(track.name)
-        self.setWindowTitle(f"{track.name} — {APP_NAME}")
-        self.tray.setToolTip(track.name)
+        self.set_now_playing(track)
         self.player.stop()
         self.load_generation += 1
         generation = self.load_generation
@@ -553,11 +686,11 @@ class PlayerWindow(QMainWindow):
             if not retried:
                 self.refresh_url_and_play(index, generation)
             else:
-                self.statusBar().showMessage(f"Недоступен: {track.name}", 4000)
+                self.show_status(f"Недоступен: {track.name}", 4000)
                 self.skip_unavailable(generation)
             return
 
-        self.statusBar().showMessage(f"Загрузка: {track.name}")
+        self.show_status(f"Загрузка: {track.name}")
 
         def fetch():
             return stream.download(track.url, self.cache_dir, track.key, lambda: generation != self.load_generation)
@@ -567,7 +700,7 @@ class PlayerWindow(QMainWindow):
                 return
             self.player.setSource(QUrl.fromLocalFile(str(path)))
             self.player.play()
-            self.statusBar().clearMessage()
+            self.show_status("")
             self.prefetch_next()
             stream.prune(self.cache_dir, CACHE_LIMIT, keep={path})
 
@@ -577,7 +710,7 @@ class PlayerWindow(QMainWindow):
             if isinstance(error, stream.ExpiredUrl) and not retried:
                 self.refresh_url_and_play(index, generation)
                 return
-            self.statusBar().showMessage(f"Не удалось загрузить «{track.name}»: {error}", 6000)
+            self.show_status(f"Не удалось загрузить «{track.name}»: {error}", 6000)
             self.skip_unavailable(generation)
 
         run_bg(fetch, done, failed)
@@ -599,7 +732,7 @@ class PlayerWindow(QMainWindow):
         self.failures += 1
         if self.failures >= 5:  # похоже, проблема не в треке, а в сети/доступе — не крутимся бесконечно
             self.failures = 0
-            self.statusBar().showMessage("Несколько треков подряд не загрузились. Проверьте интернет.", 10000)
+            self.show_status("Несколько треков подряд не загрузились. Проверьте интернет.", 10000)
             return
         QTimer.singleShot(1500, lambda: generation == self.load_generation and self.next_track())
 
@@ -651,7 +784,7 @@ class PlayerWindow(QMainWindow):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         elif self.player.source().isEmpty():
-            rows = self.table.selectionModel().selectedRows()
+            rows = self.track_view.selectionModel().selectedIndexes()
             if self.model.tracks:
                 self.play_from_view(rows[0].row() if rows else 0)
         else:
@@ -663,12 +796,12 @@ class PlayerWindow(QMainWindow):
         self.save_settings()
 
     def update_repeat_button(self) -> None:
-        text, tip = {
-            REPEAT_OFF: ("➡", "Повтор выключен"),
-            REPEAT_ALL: ("🔁", "Повтор списка"),
-            REPEAT_ONE: ("🔂", "Повтор трека"),
+        name, color, tip = {
+            REPEAT_OFF: ("repeat", ui.MUTED, "Повтор выключен"),
+            REPEAT_ALL: ("repeat", ui.ACCENT, "Повтор списка"),
+            REPEAT_ONE: ("repeat_one", ui.ACCENT, "Повтор трека"),
         }[self.repeat]
-        self.repeat_btn.setText(text)
+        self.repeat_btn.setIcon(ui.icon(name, color))
         self.repeat_btn.setToolTip(tip)
 
     # --- события плеера ---
@@ -691,6 +824,9 @@ class PlayerWindow(QMainWindow):
     def on_volume(self, value: int) -> None:
         self.audio.setVolume(value / 100)
         self.settings.setValue("volume", value)
+        name = "mute" if value == 0 else "volume_low" if value < 50 else "volume"
+        self.volume_btn.setIcon(ui.icon(name, ui.TEXT if value else ui.MUTED))
+        self.volume_btn.setToolTip("Включить звук" if value == 0 else "Выключить звук")
 
     def on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -700,12 +836,13 @@ class PlayerWindow(QMainWindow):
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.failures = 0
         playing = state == QMediaPlayer.PlaybackState.PlayingState
-        self.play_btn.setIcon(media_icon("pause" if playing else "play", "#ffffff"))
+        self.play_btn.setIcon(ui.icon("pause" if playing else "play", ui.BG))
+        self.track_view.viewport().update()
 
     def on_player_error(self, error, message: str) -> None:
         if error == QMediaPlayer.Error.NoError:
             return
-        self.statusBar().showMessage(f"Ошибка воспроизведения: {message}", 6000)
+        self.show_status(f"Ошибка воспроизведения: {message}", 6000)
         if self.current:
             # Битый файл в кэше — удаляем, чтобы в следующий раз скачать заново
             path = stream.cached(self.cache_dir, self.current.key)
@@ -720,7 +857,7 @@ class PlayerWindow(QMainWindow):
         self.player.stop()
         self.player.setSource(QUrl())
         stream.prune(self.cache_dir, 0)
-        self.statusBar().showMessage("Кэш очищен", 3000)
+        self.show_status("Кэш очищен", 3000)
 
     def logout(self) -> None:
         save_session(None)
@@ -741,33 +878,6 @@ class PlayerWindow(QMainWindow):
         event.accept()
         QApplication.quit()
 
-
-DARK_STYLE = """
-QWidget { background: #19191b; color: #e1e3e6; font-size: 13px; }
-QLineEdit { background: #232325; border: 1px solid #363738; border-radius: 6px; padding: 6px; }
-QListWidget, QTableView { background: #19191b; border: none; outline: 0; }
-QTableView { alternate-background-color: #1e1e20; selection-background-color: #2b3a4f; }
-QListWidget::item { padding: 6px; border-radius: 6px; }
-QListWidget::item:selected { background: #2b3a4f; color: #fff; }
-QHeaderView::section { background: #19191b; color: #939393; border: none; padding: 4px; }
-QToolButton { border-radius: 18px; font-size: 16px; }
-QToolButton:hover { background: #2a2a2c; }
-QToolButton:checked { background: #2b3a4f; }
-QToolButton#play { background: #447bba; border-radius: 22px; }
-QToolButton#play:hover { background: #5181b8; }
-QSlider::groove:horizontal { height: 4px; background: #363738; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #71aaeb; border-radius: 2px; }
-QSlider::handle:horizontal { background: #fff; width: 12px; margin: -4px 0; border-radius: 6px; }
-QPushButton { background: #447bba; color: white; border: none; border-radius: 6px; padding: 6px 14px; }
-QPushButton:hover { background: #5181b8; }
-QPushButton:disabled { background: #363738; color: #777; }
-QTabBar::tab { background: #232325; padding: 8px 14px; border-radius: 6px; margin: 2px; }
-QTabBar::tab:selected { background: #2b3a4f; }
-QTabWidget::pane { border: none; }
-QMenuBar { background: #19191b; }
-QMenuBar::item:selected, QMenu::item:selected { background: #2b3a4f; }
-QStatusBar { color: #939393; }
-"""
 
 _window: Optional[PlayerWindow] = None
 
@@ -799,10 +909,17 @@ def main() -> int:
     QApplication.setOrganizationName("VKPlayer")
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setStyleSheet(DARK_STYLE)
-    icon_path = Path(__file__).with_name("icon.png")
-    if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
+    app.setStyle("Fusion")
+    try:  # тёмный заголовок окна в Windows 10/11 (Qt 6.8+)
+        QGuiApplication.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+    except AttributeError:
+        pass
+    font = QFont()
+    font.setFamilies(["Segoe UI Variable Text", "Segoe UI", "Inter", "Roboto", "Helvetica Neue", "Arial"])
+    font.setPointSizeF(10)
+    app.setFont(font)
+    app.setStyleSheet(ui.STYLE)
+    app.setWindowIcon(ui.icon("logo", size=64))
     start_app_window()
     if _window is None:
         return 0

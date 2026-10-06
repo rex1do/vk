@@ -137,16 +137,35 @@ class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("VK Player — вход")
-        self.setMinimumWidth(420)
+        self.setMinimumSize(500, 420)
         self.session: Optional[dict] = None
 
+        from . import ui  # здесь, чтобы auth не зависел от ui при импорте
+
+        logo = QLabel()
+        logo.setPixmap(ui.icon_pixmap("logo", size=56))
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("VK Player")
+        title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle = QLabel("Войдите во ВКонтакте, чтобы слушать свою музыку")
+        subtitle.setStyleSheet(f"color: {ui.MUTED};")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         tabs = self.tabs = QTabWidget(self)
-        tabs.addTab(self._tab_browser(), "Через окно ВК")
+        tabs.addTab(self._tab_browser(), "Окно ВК")
         tabs.addTab(self._tab_password(), "Логин и пароль")
-        tabs.addTab(self._tab_token(), "Токен")
+        tabs.addTab(self._tab_token(), "Через браузер")
+        tabs.tabBar().setExpanding(True)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(tabs)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(6)
+        layout.addWidget(logo)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addSpacing(14)
+        layout.addWidget(tabs, 1)
 
     # --- вкладки ---
 
@@ -258,7 +277,7 @@ class LoginDialog(QDialog):
                 extra = {"code": code}
             elif error == "need_validation":
                 QMessageBox.warning(
-                    self, "Вход", "ВК требует подтверждения входа. Попробуйте вкладку «Через окно ВК».\n\n" + description
+                    self, "Вход", "ВК требует подтверждения входа. Попробуйте вкладку «Через браузер».\n\n" + description
                 )
                 return
             elif error == "need_captcha":
@@ -277,7 +296,7 @@ class LoginDialog(QDialog):
                     "Вход",
                     "ВК временно запретил вход по паролю для этого аккаунта (защита от подбора, "
                     "снимается через несколько часов). Сам аккаунт не заблокирован.\n\n"
-                    "Можно войти без пароля через браузер — откройте вкладку «Токен».",
+                    "Можно войти без пароля через браузер — откройте вкладку «Через браузер».",
                 )
                 self.tabs.setCurrentIndex(2)
                 return
@@ -329,7 +348,7 @@ class LoginDialog(QDialog):
             if dialog.exec() and edit.text().strip():
                 return {"captcha_sid": data.get("captcha_sid"), "captcha_key": edit.text().strip()}
             return None
-        QMessageBox.warning(self, "Капча", "ВК запросил капчу. Попробуйте вкладку «Через окно ВК».")
+        QMessageBox.warning(self, "Капча", "ВК запросил капчу. Попробуйте вкладку «Через браузер».")
         return None
 
     def finish(self, token: str, client: vk.Client, user_id=None) -> None:
