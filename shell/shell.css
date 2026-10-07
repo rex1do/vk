@@ -847,3 +847,9 @@ body.fs-idle .fs-progress .seek { opacity: .55; }
 .qcard.next .qcard-title { font-size: 16px; }
 .qcard-artist { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 @media (prefers-reduced-motion: reduce) { .fs-heart { animation-duration: .01s; } }
+
+/* плавные переходы: длительность */
+.eq-foot .switch-row + .switch-row { margin-top: 10px; }
+.cf-row { display: grid; grid-template-columns: auto 1fr 34px; align-items: center; gap: 12px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+.cf-row b { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+.cf-row.off { opacity: .4; pointer-events: none; }

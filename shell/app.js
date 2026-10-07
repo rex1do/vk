@@ -1296,9 +1296,52 @@ bridge.onFocusSearch(() => { searchInput.focus(); searchInput.select(); });
 
 // --- Плеер ---------------------------------------------------------------------------------
 
-const audio = new Audio();
-audio.preload = 'auto';
-audio.crossOrigin = 'anonymous'; // нужно эквалайзеру (CDN ВК разрешает такие запросы)
+// Две «деки»: при плавном переходе одна затихает, другая нарастает. Остальной код работает
+// с «audio» — это прослойка, которая всегда ведёт к активной деке; события неактивной игнорируются.
+const decks = [new Audio(), new Audio()];
+decks.forEach((d) => {
+  d.preload = 'auto';
+  d.crossOrigin = 'anonymous'; // нужно эквалайзеру (CDN ВК разрешает такие запросы)
+  d.fade = 1; // множитель громкости для переходов
+});
+let deckIdx = 0;
+const deck = () => decks[deckIdx];
+const audio = new Proxy({}, {
+  get(_t, prop) {
+    if (prop === 'addEventListener') {
+      return (type, fn, opts) => decks.forEach((d) => d.addEventListener(type, (e) => { if (e.target === deck()) fn(e); }, opts));
+    }
+    const el = deck();
+    const v = el[prop];
+    return typeof v === 'function' ? v.bind(el) : v;
+  },
+  set(_t, prop, value) { deck()[prop] = value; return true; },
+});
+
+// --- Плавные переходы между треками (кроссфейд) ---------------------------------------------
+let userVolume = 1;
+const applyVolume = (d) => { d.volume = Math.max(0, Math.min(1, userVolume * d.fade)); };
+const crossfade = {
+  enabled: localStorage.getItem('crossfade') !== '0', // включено по умолчанию
+  seconds: Number(localStorage.getItem('crossfadeSec')) || 6,
+  save() {
+    localStorage.setItem('crossfade', this.enabled ? '1' : '0');
+    localStorage.setItem('crossfadeSec', String(this.seconds));
+  },
+  // плавно меняем громкость деки (равная мощность: косинус/синус), таймером — работает и в свёрнутом окне
+  fade(d, to, sec, done) {
+    clearInterval(d.fadeTimer);
+    const from = d.fade, start = performance.now();
+    if (sec <= 0) { d.fade = to; applyVolume(d); if (done) done(); return; }
+    d.fadeTimer = setInterval(() => {
+      const k = Math.min(1, (performance.now() - start) / (sec * 1000));
+      const curve = to > from ? Math.sin(k * Math.PI / 2) : Math.cos((1 - k) * Math.PI / 2);
+      d.fade = from + (to - from) * curve;
+      applyVolume(d);
+      if (k >= 1) { clearInterval(d.fadeTimer); if (done) done(); }
+    }, 30);
+  },
+};
 
 const player = {
   queue: [],
@@ -1413,6 +1456,11 @@ const player = {
     if (!track) return;
     if (this.mix) this.extendMix();
     const id = ++this.loadId;
+    // плавный переход: при автопереходе — заданная длительность, при ручном переключении — коротко
+    const wasPlaying = this.current && !audio.paused && deck().currentTime > 0.5;
+    const fadeSec = this.pendingFade || (crossfade.enabled && wasPlaying ? 1.2 : 0);
+    this.pendingFade = 0;
+    if (fadeSec > 0) this.swapDeck(fadeSec);
     this.current = track;
     renderNowPlaying();
     this.markRows();
@@ -1499,12 +1547,15 @@ const player = {
         if (id === this.loadId) this.skipBroken();
       });
       hls.loadSource(url);
-      hls.attachMedia(audio);
+      hls.attachMedia(deck());
     } else {
-      audio.src = url;
-      if (startAt > 0) audio.addEventListener('loadedmetadata', () => { audio.currentTime = startAt; }, { once: true });
+      const el = deck();
+      el.src = url;
+      if (startAt > 0) el.addEventListener('loadedmetadata', () => { el.currentTime = startAt; }, { once: true });
     }
     if (!wasPaused) audio.play().catch(() => {});
+    const d = deck();
+    if (this.fadeInNext) { crossfade.fade(d, 1, this.fadeInNext); this.fadeInNext = 0; } else if (d.fade !== 1 && !d.fadeTimer) { d.fade = 1; applyVolume(d); }
   },
 
   destroyHls() {
@@ -1512,6 +1563,26 @@ const player = {
       this.hls.destroy();
       this.hls = null;
     }
+  },
+
+  // Переход на другую деку: старая затихает за sec секунд и останавливается, новая начинает с тишины
+  swapDeck(sec) {
+    const old = deck();
+    const oldHls = this.hls;
+    this.hls = null;
+    deckIdx = 1 - deckIdx;
+    const fresh = deck();
+    clearInterval(fresh.fadeTimer);
+    fresh.fade = 0;
+    applyVolume(fresh);
+    this.fadeInNext = sec;
+    crossfade.fade(old, 0, sec, () => {
+      if (old === deck()) return; // уже снова активна (быстрые переключения)
+      old.pause();
+      if (oldHls) oldHls.destroy();
+      old.removeAttribute('src');
+      old.load();
+    });
   },
 
   skipBroken() {
@@ -1553,8 +1624,29 @@ const player = {
 
   toggle() {
     if (!this.current) return;
-    if (audio.paused) audio.play().catch(() => {});
-    else audio.pause();
+    const d = deck();
+    if (audio.paused) {
+      if (crossfade.enabled) { clearInterval(d.fadeTimer); d.fade = 0; applyVolume(d); }
+      audio.play().catch(() => {});
+      if (crossfade.enabled) crossfade.fade(d, 1, 0.35);
+    } else if (crossfade.enabled) {
+      crossfade.fade(d, 0, 0.3, () => { if (d === deck()) { d.pause(); d.fade = 1; applyVolume(d); } });
+    } else {
+      audio.pause();
+    }
+  },
+
+  // автоматический переход заранее, до конца трека
+  maybeCrossfade() {
+    if (!crossfade.enabled || this.crossLock || this.repeat === 'one' || !this.current) return;
+    const d = deck();
+    const left = (d.duration || 0) - d.currentTime;
+    const sec = crossfade.seconds;
+    if (!isFinite(left) || d.duration < sec * 3 || left > sec || left < 0.4 || d.paused) return;
+    if (this.pos + 1 >= this.order.length && this.repeat !== 'all' && !this.mix) return;
+    this.crossLock = this.loadId;
+    this.pendingFade = Math.min(sec, left);
+    this.next(true);
   },
 
   playNext(track) {
@@ -1655,6 +1747,8 @@ audio.addEventListener('pause', () => { document.body.classList.remove('is-playi
 audio.addEventListener('ended', () => player.next(true));
 audio.addEventListener('error', () => { if (player.current && !player.hls) player.skipBroken(); });
 audio.addEventListener('timeupdate', renderProgress);
+audio.addEventListener('timeupdate', () => player.maybeCrossfade());
+audio.addEventListener('playing', () => { if (player.crossLock && player.crossLock !== player.loadId) player.crossLock = 0; });
 audio.addEventListener('durationchange', renderProgress);
 
 // --- Отображение «Сейчас играет» -----------------------------------------------------------
@@ -2040,14 +2134,15 @@ seekEls.forEach((s) => {
 
 let lastVolume = Number(localStorage.getItem('volume') || 0.8);
 function setVolume(v, remember = true) {
-  audio.volume = Math.max(0, Math.min(1, v));
+  userVolume = Math.max(0, Math.min(1, v));
+  decks.forEach(applyVolume);
   if (remember && v > 0) lastVolume = v;
-  localStorage.setItem('volume', String(audio.volume));
-  $$('.vol').forEach((r) => { r.value = Math.round(audio.volume * 100); setFill(r); });
-  $$('.volume').forEach((w) => w.classList.toggle('muted', audio.volume === 0));
+  localStorage.setItem('volume', String(userVolume));
+  $$('.vol').forEach((r) => { r.value = Math.round(userVolume * 100); setFill(r); });
+  $$('.volume').forEach((w) => w.classList.toggle('muted', userVolume === 0));
 }
 $$('.vol').forEach((r) => r.addEventListener('input', () => setVolume(r.value / 100)));
-$$('.mute').forEach((b) => b.addEventListener('click', () => setVolume(audio.volume > 0 ? 0 : lastVolume || 0.7, false)));
+$$('.mute').forEach((b) => b.addEventListener('click', () => setVolume(userVolume > 0 ? 0 : lastVolume || 0.7, false)));
 
 // кнопки управления
 document.addEventListener('click', (e) => {
@@ -2520,7 +2615,7 @@ const eq = {
     if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
     try {
       const ctx = new AudioContext();
-      const source = ctx.createMediaElementSource(audio);
+      const sources = decks.map((d) => ctx.createMediaElementSource(d));
       this.filters = this.freqs.map((f, i) => {
         const b = ctx.createBiquadFilter();
         b.type = i === 0 ? 'lowshelf' : i === this.freqs.length - 1 ? 'highshelf' : 'peaking';
@@ -2531,7 +2626,8 @@ const eq = {
       this.analyser = ctx.createAnalyser();
       this.analyser.fftSize = 512;
       this.analyser.smoothingTimeConstant = 0.6;
-      [source, ...this.filters, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
+      sources.forEach((src) => src.connect(this.filters[0]));
+      [...this.filters, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
       this.ctx = ctx;
       this.apply();
     } catch (err) {
@@ -3001,6 +3097,18 @@ const uncensorDetails = {
   },
 };
 
+// настройки плавных переходов (в панели эквалайзера)
+function renderCrossfade() {
+  $('#crossfade-on').checked = crossfade.enabled;
+  $('#crossfade-sec').value = String(crossfade.seconds);
+  $('#crossfade-val').textContent = `${crossfade.seconds} с`;
+  $('#cf-row').classList.toggle('off', !crossfade.enabled);
+  setFill($('#crossfade-sec'));
+}
+$('#crossfade-on').addEventListener('change', () => { crossfade.enabled = $('#crossfade-on').checked; crossfade.save(); renderCrossfade(); });
+$('#crossfade-sec').addEventListener('input', () => { crossfade.seconds = Number($('#crossfade-sec').value); crossfade.save(); renderCrossfade(); });
+renderCrossfade();
+
 $('#uncensor-on').checked = uncensor.enabled;
 $('#uncensor-on').addEventListener('change', () => {
   uncensor.enabled = $('#uncensor-on').checked;
@@ -3219,8 +3327,8 @@ audio.addEventListener('play', () => idle.wake());
 
   cover.addEventListener('wheel', (e) => {
     e.preventDefault();
-    setVolume(audio.volume + (e.deltaY < 0 ? 0.05 : -0.05));
-    say(`Громкость ${Math.round(audio.volume * 100)}%`);
+    setVolume(userVolume + (e.deltaY < 0 ? 0.05 : -0.05));
+    say(`Громкость ${Math.round(userVolume * 100)}%`);
   }, { passive: false });
 
   let start = null, mode = '', preview = 0;
