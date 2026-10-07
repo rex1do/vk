@@ -1355,7 +1355,11 @@ let preparedKey = null;
 async function prepareNext() {
   const nextPos = player.pos + 1 < player.order.length ? player.pos + 1 : (player.repeat === 'all' ? 0 : -1);
   const next = nextPos >= 0 ? player.queue[player.order[nextPos]] : null;
-  if (next && uncensor.applies(next) && uncensor.get(next.key) === undefined) uncensor.analyze(next);
+  // следующий трек проверяем заранее, после текущего — чтобы к его началу уже играла версия без цензуры
+  if (next && uncensor.applies(next) && uncensor.get(next.key) === undefined) {
+    const current = player.current && uncensor.jobs.get(player.current.key);
+    Promise.resolve(current).catch(() => null).then(() => uncensor.analyze(next));
+  }
   if (!next || next.url || preparedKey === next.key) return;
   preparedKey = next.key;
   try {
@@ -2266,7 +2270,16 @@ function similar(a, b) {
 const uncensor = {
   enabled: localStorage.getItem('uncensor') !== '0', // включено по умолчанию
   // вердикты: ключ трека → найденная версия или { none: время }; «не найдено» перепроверяем через 3 дня
-  memo: (() => { try { return JSON.parse(localStorage.getItem('uncensorMemo3') || '{}'); } catch { return {}; } })(),
+  // при смене способа проверки старые вердикты сбрасываются, ручной выбор пользователя остаётся
+  memo: (() => {
+    try {
+      const saved = localStorage.getItem('uncensorMemo4');
+      if (saved) return JSON.parse(saved);
+      const old = JSON.parse(localStorage.getItem('uncensorMemo3') || '{}');
+      ['uncensorMemo2', 'uncensorMemo3'].forEach((k) => localStorage.removeItem(k));
+      return Object.fromEntries(Object.entries(old).filter(([, v]) => v && v.manual));
+    } catch { return {}; }
+  })(),
   jobs: new Map(), // идущие проверки
   status: new Map(), // ход проверки по трекам — для индикатора и подробностей
   decodeCtx: null,
@@ -2282,7 +2295,7 @@ const uncensor = {
     this.memo[key] = value || { none: Date.now() };
     const keys = Object.keys(this.memo);
     if (keys.length > 1500) keys.slice(0, keys.length - 1500).forEach((k) => delete this.memo[k]);
-    try { localStorage.setItem('uncensorMemo3', JSON.stringify(this.memo)); } catch { /* не страшно */ }
+    try { localStorage.setItem('uncensorMemo4', JSON.stringify(this.memo)); } catch { /* не страшно */ }
   },
 
   // нужно ли вообще проверять этот трек

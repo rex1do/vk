@@ -673,6 +673,9 @@ body.immersive .fullscreen { inset: 0; border-radius: 0; border-top: 0; }
 /* Открыт полноэкранный плеер: шапка программы не нужна — лист на всё окно, остаются только кнопки окна */
 body.fs-open .fullscreen { inset: 0; border-radius: 0; border-top: 0; box-shadow: none; }
 body.fs-open .window-buttons { position: fixed; top: 0; right: 0; margin: 0; z-index: 35; }
+/* область перетаскивания листа идёт в документе позже кнопок окна и перекрывала их — оставляем под кнопками «окно» без перетаскивания */
+.fs-win-hole { display: none; position: absolute; top: 0; right: 0; width: 150px; height: 36px; -webkit-app-region: no-drag; }
+body.fs-open .fs-win-hole { display: block; }
 body.fs-open .fs-tabs { right: 156px; }
 body.immersive .window-buttons { display: none; }
 @media (max-width: 860px) { body.fs-open .fs-tabs { top: 46px; right: 50%; transform: translateX(50%); } }
