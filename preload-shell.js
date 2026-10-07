@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('vkp', {
   showFile: (file) => ipcRenderer.send('show-file', file),
   audioData: (url, maxSeconds) => ipcRenderer.invoke('audio-data', url, maxSeconds),
   geniusLyrics: (info) => ipcRenderer.invoke('genius-lyrics', info),
+  lrclibLyrics: (info) => ipcRenderer.invoke('lrclib-lyrics', info),
+  saveReport: (text) => ipcRenderer.invoke('save-report', text),
   geniusOpen: (info) => ipcRenderer.invoke('genius-open', info),
   onDownloadProgress: (fn) => ipcRenderer.on('download-progress', (_e, data) => fn(data)),
   trackTitle: (title) => ipcRenderer.send('track-title', title),

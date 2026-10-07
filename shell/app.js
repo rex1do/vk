@@ -57,6 +57,27 @@ const plural = (n, one, few, many) => {
 };
 const tracksWord = (n) => `${n} ${plural(n, 'трек', 'трека', 'треков')}`;
 
+// Журнал для отчёта разработчику: что приложение пробовало и что получило (без токенов и ссылок на звук)
+const diag = {
+  entries: [],
+  add(area, text, data) {
+    this.entries.push({ t: new Date().toISOString().slice(11, 19), area, text, data });
+    if (this.entries.length > 400) this.entries.splice(0, this.entries.length - 400);
+  },
+  async save() {
+    const scrub = (v) => JSON.stringify(v, (k, x) => (/token|access_key|^url$|secret/i.test(k) ? undefined : x), 1);
+    const text = [
+      `VK Player ${navigator.userAgent}`,
+      `Вход: ${auth.loggedIn ? 'да' : 'нет'}`,
+      '',
+      ...this.entries.map((e) => `[${e.t}] ${e.area}: ${e.text}${e.data !== undefined ? '\n' + scrub(e.data) : ''}`),
+    ].join('\n');
+    const file = await bridge.saveReport(text);
+    toast('Отчёт сохранён в «Загрузки»');
+    return file;
+  },
+};
+
 let toastTimer = null;
 function toast(text, { onClick = null, duration = 2600 } = {}) {
   const t = $('#toast');
@@ -613,39 +634,69 @@ async function viewPublicList(url, eyebrow, title) {
 // Чарт VK Музыки. Гостевой каталог ВК отдаёт устаревший чарт, поэтому ищем блок чарта
 // в каталоге аккаунта: блок с раскладкой music_chart_* и его «Показать все».
 async function chartFromAccount() {
-  const isChart = (b) => /chart/.test((b.layout && b.layout.name) || '') && b.data_type === 'music_audios';
-  const scan = async (resp, depth) => {
+  const isChart = (b) => b.data_type === 'music_audios'
+    && (/chart/.test((b.layout && b.layout.name) || '') || /chart/.test(b.url || '') || /чарт/i.test(b.title || (b.layout && b.layout.title) || ''));
+  const describe = (resp) => ((resp.catalog && resp.catalog.sections) || (resp.section ? [resp.section] : [])).map((sec) => ({
+    title: sec.title, url: sec.url,
+    blocks: (sec.blocks || []).map((b) => `${b.data_type}/${(b.layout && b.layout.name) || ''}/${(b.layout && b.layout.title) || b.title || ''} ${b.url || ''}`).slice(0, 40),
+  }));
+  const firstTracks = (data) => (data.blocks.find((x) => x.kind === 'tracks') || { tracks: [] }).tracks.slice(0, 5).map((t) => `${t.artist} — ${t.title}`);
+  const scan = async (resp, depth, where) => {
+    diag.add('chart', `ответ ${where}`, describe(resp));
     const sections = (resp.catalog && resp.catalog.sections) || (resp.section ? [resp.section] : []);
     for (const sec of sections) {
+      // вкладка, которая сама и есть чарт
+      if (/block=chart/.test(sec.url || '') && (sec.blocks || []).some((b) => b.data_type === 'music_audios')) return parseCatalog(resp, sec);
       const block = (sec.blocks || []).find(isChart);
       if (!block) continue;
       const showAll = block.meta && block.meta.show_all_info && block.meta.show_all_info.section_id;
-      if (/list/.test(block.layout.name) || !showAll) return parseCatalog(resp, sec);
-      return parseCatalog(await vk('catalog.getSection', { section_id: showAll }));
+      const action = (block.actions || []).find((x) => x.section_id);
+      const target = showAll || (action && action.section_id);
+      if (/list/.test((block.layout && block.layout.name) || '') || !target) return parseCatalog(resp, sec);
+      return parseCatalog(await vk('catalog.getSection', { section_id: target }));
     }
     // вкладки без содержимого (Главная, Обзор…) открываем по одной
     if (depth > 0) {
-      for (const sec of sections.filter((x) => !(x.blocks || []).length).slice(0, 4)) {
+      for (const sec of sections.filter((x) => !(x.blocks || []).length).slice(0, 5)) {
         try {
-          const found = await scan(await vk('catalog.getSection', { section_id: sec.id }), depth - 1);
+          const found = await scan(await vk('catalog.getSection', { section_id: sec.id }), depth - 1, `вкладка «${sec.title}»`);
           if (found) return found;
-        } catch { /* следующая вкладка */ }
+        } catch (err) { diag.add('chart', `вкладка «${sec.title}»: ${err.message}`); }
       }
     }
     return null;
   };
-  for (const url of ['https://vk.ru/audio?block=chart', 'https://vk.ru/audio?section=explore', 'https://vk.ru/audio']) {
+  const accept = (found, where) => {
+    if (found && found.blocks.some((b) => b.kind === 'tracks')) {
+      diag.add('chart', `взят чарт: ${where}`, firstTracks(found));
+      return found;
+    }
+    return null;
+  };
+  for (const url of ['https://vk.ru/audio?block=chart', 'https://vk.com/audio?block=chart', 'https://vk.ru/audio?section=explore', 'https://vk.ru/audio']) {
     try {
-      const found = await scan(await vk('catalog.getAudio', { url, need_blocks: 1 }), 1);
-      if (found && found.blocks.some((b) => b.kind === 'tracks')) return found;
-    } catch { /* следующий адрес */ }
+      const found = accept(await scan(await vk('catalog.getAudio', { url, need_blocks: 1 }), 1, url), url);
+      if (found) return found;
+    } catch (err) { diag.add('chart', `${url}: ${err.message}`); }
   }
+  // раздел чарта из публичного каталога, но открытый от имени аккаунта
+  try {
+    const guest = await vk('catalog.getAudio', { url: 'https://vk.ru/audio?block=chart', need_blocks: 1 }, { anonymous: true });
+    const sec = ((guest.catalog && guest.catalog.sections) || [])[0];
+    if (sec) {
+      const found = accept(parseCatalog(await vk('catalog.getSection', { section_id: sec.id })), 'раздел публичного чарта от аккаунта');
+      if (found) return found;
+    }
+  } catch (err) { diag.add('chart', `раздел публичного чарта: ${err.message}`); }
   return null;
 }
 
 async function viewChart() {
   const data = auth.loggedIn ? await chartFromAccount() : null;
-  if (!data) return viewPublicList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт VK Музыки');
+  if (!data) {
+    diag.add('chart', 'в аккаунте чарт не найден — показан публичный');
+    return viewPublicList('https://vk.ru/audio?block=chart', 'Открыть новое', 'Чарт VK Музыки');
+  }
   const block = data.blocks.find((b) => b.kind === 'tracks');
   const tracks = block.tracks;
   tracks.forEach((t, i) => { if (!t.chart) t.chart = { position: i + 1, state: '' }; });
@@ -1132,28 +1183,33 @@ const player = {
     // иначе играем лицензию, а проверка идёт в фоне и подменит звук на той же секунде
     track.substitute = null;
     let playUrl = track.url;
-    if (uncensor.applies(track) && track.key in uncensor.memo && uncensor.memo[track.key]) {
-      const alt = uncensor.memo[track.key];
-      const altUrl = await uncensor.urlOf(alt);
+    const known = uncensor.applies(track) ? uncensor.get(track.key) : undefined;
+    if (known) {
+      const altUrl = await uncensor.urlOf(known);
       if (id !== this.loadId) return;
-      if (altUrl) { track.substitute = { ...alt, url: altUrl }; playUrl = altUrl; }
+      if (altUrl) { track.substitute = { ...known, url: altUrl }; playUrl = altUrl; }
+      uncensor.status.set(track.key, { state: 'found', found: known, results: [], done: 0, total: 0 });
     } else if (uncensor.applies(track)) {
-      uncensor.analyze(track).then(async (alt) => {
-        if (!alt || id !== this.loadId) return;
-        const altUrl = await uncensor.urlOf(alt);
-        if (!altUrl || id !== this.loadId) return;
-        track.substitute = { ...alt, url: altUrl };
-        renderSubstitute();
-        this.attach(altUrl, id, track, false, audio.currentTime);
-        toast('Включена версия без цензуры');
-      });
+      uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id));
     }
+    renderUncensorStatus();
     renderSubstitute();
     if (!playUrl) {
       toast(auth.loggedIn ? 'Трек недоступен' : 'Полная версия — после входа');
       return this.skipBroken();
     }
     this.attach(playUrl, id, track);
+  },
+
+  // найдена версия без цензуры — переключаемся на неё на той же секунде
+  async useSubstitute(track, alt, id = this.loadId) {
+    if (!alt || id !== this.loadId || this.current !== track) return;
+    const altUrl = await uncensor.urlOf(alt);
+    if (!altUrl || id !== this.loadId) return;
+    track.substitute = { ...alt, url: altUrl };
+    renderSubstitute();
+    this.attach(altUrl, id, track, false, audio.currentTime);
+    toast('Включена версия без цензуры');
   },
 
   attach(url, id, track, retried = false, startAt = 0) {
@@ -1275,7 +1331,7 @@ let preparedKey = null;
 async function prepareNext() {
   const nextPos = player.pos + 1 < player.order.length ? player.pos + 1 : (player.repeat === 'all' ? 0 : -1);
   const next = nextPos >= 0 ? player.queue[player.order[nextPos]] : null;
-  if (next && uncensor.applies(next) && !(next.key in uncensor.memo)) uncensor.analyze(next);
+  if (next && uncensor.applies(next) && uncensor.get(next.key) === undefined) uncensor.analyze(next);
   if (!next || next.url || preparedKey === next.key) return;
   preparedKey = next.key;
   try {
@@ -1358,13 +1414,23 @@ function renderQueue() {
 
 // --- Настройки VK Микса: настроение, узнаваемость, язык -------------------------------------
 // Варианты берём у ВК (audio.getStreamMixSettings), а если он их не отдал — те же, что в приложении ВК.
+// Значки настроения — свои, объёмные (эмодзи в Windows выглядят по-разному и грубо)
+const MOOD_ICONS = {
+  joyful: `<svg viewBox="0 0 48 48"><defs><radialGradient id="mg-sun" cx="40%" cy="35%" r="70%"><stop offset="0" stop-color="#fff3b0"/><stop offset=".55" stop-color="#ffc53d"/><stop offset="1" stop-color="#ff8a1f"/></radialGradient></defs><g fill="#ffb43a">${Array.from({ length: 8 }, (_, i) => `<rect x="22" y="2" width="4" height="9" rx="2" transform="rotate(${i * 45} 24 24)"/>`).join('')}</g><circle cx="24" cy="24" r="11" fill="url(#mg-sun)"/></svg>`,
+  sad: '<svg viewBox="0 0 48 48"><defs><linearGradient id="mg-moon" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9fc2ff"/><stop offset="1" stop-color="#2f4bff"/></linearGradient></defs><path d="M30 7a17 17 0 1 0 11 27A14 14 0 0 1 30 7z" fill="url(#mg-moon)"/><circle cx="36" cy="13" r="1.6" fill="#cfe0ff"/><circle cx="41" cy="21" r="1.1" fill="#cfe0ff"/></svg>',
+  active: '<svg viewBox="0 0 48 48"><defs><linearGradient id="mg-fire" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ff3d2e"/><stop offset=".6" stop-color="#ff8a2a"/><stop offset="1" stop-color="#ffd166"/></linearGradient></defs><path d="M24 4c2 7 11 11 11 22a11 11 0 0 1-22 0c0-6 3-9 5-11 0 4 2 6 4 6-1-6 0-12 2-17z" fill="url(#mg-fire)"/><path d="M24 26c2 3 5 4 5 8a5 5 0 0 1-10 0c0-3 3-5 5-8z" fill="#ffe08a"/></svg>',
+  calm: '<svg viewBox="0 0 48 48"><defs><linearGradient id="mg-calm" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d7b8ff"/><stop offset="1" stop-color="#7b4dff"/></linearGradient></defs><g fill="url(#mg-calm)">' + Array.from({ length: 6 }, (_, i) => `<ellipse cx="24" cy="13" rx="6" ry="10" transform="rotate(${i * 60} 24 24)"/>`).join('') + '</g><circle cx="24" cy="24" r="5" fill="#f1e6ff"/></svg>',
+  love: '<svg viewBox="0 0 48 48"><defs><linearGradient id="mg-love" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffb3d1"/><stop offset="1" stop-color="#ff2d78"/></linearGradient></defs><path d="M24 41S6 30 6 17a9 9 0 0 1 18-3 9 9 0 0 1 18 3c0 13-18 24-18 24z" fill="url(#mg-love)"/><ellipse cx="15" cy="15" rx="3.5" ry="2.2" fill="#fff" opacity=".45" transform="rotate(-30 15 15)"/></svg>',
+};
+
+// Варианты берём у ВК (audio.getStreamMixSettings), а если он их не отдал — те же, что в приложении ВК.
 const MIX_DEFAULT_GROUPS = [
   { id: 'mood', title: 'Настроение', big: true, options: [
-    { id: 'joyful', title: 'Радостно', icon: '☀️' },
-    { id: 'sad', title: 'Грустно', icon: '🌙' },
-    { id: 'active', title: 'Активно', icon: '🔥' },
-    { id: 'calm', title: 'Спокойно', icon: '✳️' },
-    { id: 'love', title: 'Любовь', icon: '💗' },
+    { id: 'joyful', title: 'Радостно', svg: MOOD_ICONS.joyful },
+    { id: 'sad', title: 'Грустно', svg: MOOD_ICONS.sad },
+    { id: 'active', title: 'Активно', svg: MOOD_ICONS.active },
+    { id: 'calm', title: 'Спокойно', svg: MOOD_ICONS.calm },
+    { id: 'love', title: 'Любовь', svg: MOOD_ICONS.love },
   ] },
   { id: 'popularity', title: 'Узнаваемость', options: [
     { id: 'familiar', title: 'Знакомое', local: 'familiar' },
@@ -1433,12 +1499,13 @@ const mixSettings = {
     if (this.fromVk || !auth.loggedIn) return;
     try {
       const resp = await vk('audio.getStreamMixSettings', {}, { cache: false });
+      diag.add('mix', 'audio.getStreamMixSettings', resp);
       const rawGroups = Array.isArray(resp) ? resp : resp.items || resp.settings || resp.groups || resp.blocks || resp.filters || [];
       const groups = rawGroups.map((g) => {
         const options = (g.options || g.items || g.values || g.buttons || []).map((o) => ({
           id: String(o.id ?? o.value ?? o.key ?? o.name ?? ''),
           title: o.title || o.name || o.text || '',
-          icon: '',
+          svg: '',
           image: (o.icon && (o.icon.url || (Array.isArray(o.icon) && o.icon.length && o.icon[o.icon.length - 1].url))) || (o.image && o.image.url) || '',
           mixId: o.mix_id || '',
           params: o.params || o.request_params || null,
@@ -1452,14 +1519,14 @@ const mixSettings = {
         if (def) g.big = def.big;
         for (const o of g.options) {
           const d = MIX_DEFAULT_GROUPS.flatMap((x) => x.options).find((x) => x.title.toLowerCase() === o.title.toLowerCase());
-          if (d) { o.icon = o.image ? '' : d.icon; o.local = d.local; }
+          if (d) { o.svg = o.image ? '' : d.svg; o.local = d.local; }
         }
       }
       this.groups = groups;
       this.fromVk = true;
       for (const k of Object.keys(this.chosen)) if (!this.option(k, this.chosen[k])) delete this.chosen[k];
-    } catch {
-      /* остаются варианты по умолчанию */
+    } catch (err) {
+      diag.add('mix', `audio.getStreamMixSettings: ${err.message}`); // остаются варианты по умолчанию
     }
   },
 
@@ -1471,7 +1538,7 @@ const mixSettings = {
     panel = el('div', { class: 'mix-settings-backdrop', id: 'mix-settings', onclick: (e) => { if (e.target === panel) this.close(); } },
       el('div', { class: 'mix-settings', role: 'dialog', 'aria-label': 'Настроить VK Микс' },
         el('div', { class: 'ms-head' },
-          el('div', { class: 'ms-title', text: 'Настроить VK Микс' }),
+          el('div', {}, el('div', { class: 'ms-title', text: 'Настроить VK Микс' }), el('div', { class: 'ms-sub', text: 'Выберите по одному варианту в любой группе' })),
           el('button', { class: 'ms-close', title: 'Закрыть', html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>', onclick: () => this.close() })),
         this.groups.map((g) => el('div', { class: 'ms-group' },
           el('div', { class: 'ms-label', text: g.title }),
@@ -1480,11 +1547,11 @@ const mixSettings = {
             dataset: { group: g.id, opt: o.id },
             onclick: () => { this.draft[g.id] = this.draft[g.id] === o.id ? '' : o.id; this.paint(); },
           },
-          g.big ? el('span', { class: 'ms-icon' }, o.image ? el('img', { src: o.image, alt: '' }) : o.icon || '♪') : null,
+          g.big ? (o.image ? el('span', { class: 'ms-icon' }, el('img', { src: o.image, alt: '' })) : el('span', { class: 'ms-icon', html: o.svg || MOOD_ICONS.calm })) : null,
           el('span', { class: 'ms-text', text: o.title })))))),
         el('div', { class: 'ms-foot' },
-          el('button', { class: 'btn ghost', text: 'Сбросить', onclick: () => { this.draft = {}; this.paint(); } }),
-          el('button', { class: 'btn primary', id: 'ms-apply', text: 'Применить', onclick: () => this.apply() }))));
+          el('button', { class: 'ms-reset', text: 'Сбросить', onclick: () => { this.draft = {}; this.paint(); } }),
+          el('button', { class: 'ms-apply', id: 'ms-apply', text: 'Применить', onclick: () => this.apply() }))));
     document.body.append(panel);
     this.paint();
   },
@@ -1671,13 +1738,28 @@ const lyrics = {
         parsed = null;
       }
     }
-    // у ВК текста нет — ищем на Genius
+    if (!parsed) diag.add('lyrics', `${t.artist} — ${t.title}: у ВК текста нет`);
+    // у ВК текста нет — открытая база LRCLIB (часто с привязкой ко времени), затем Genius
+    if (!parsed && player.current && player.current.key === t.key) {
+      lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Ищем текст…' }));
+      const lrc = await bridge.lrclibLyrics({ artist: t.artist, title: t.title, duration: t.duration }).catch(() => null);
+      if (lrc && lrc.synced) {
+        const lines = lrc.synced.split('\n').map((line) => {
+          const m = /^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/.exec(line.trim());
+          return m ? { time: Number(m[1]) * 60 + Number(m[2]), text: m[3] } : null;
+        }).filter(Boolean);
+        if (lines.length) parsed = { synced: true, lines, source: 'LRCLIB' };
+      }
+      if (!parsed && lrc && lrc.plain) parsed = { synced: false, lines: lrc.plain.split('\n').map((text) => ({ time: 0, text })), source: 'LRCLIB' };
+      diag.add('lyrics', `LRCLIB: ${parsed ? 'найден' : 'нет'}`);
+    }
     if (!parsed && player.current && player.current.key === t.key) {
       lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Ищем текст на Genius…' }));
-      const genius = await bridge.geniusLyrics({ artist: t.artist, title: t.title }).catch(() => null);
+      const genius = await bridge.geniusLyrics({ artist: t.artist, title: t.title }).catch((err) => ({ error: String(err) }));
       if (genius && genius.lines && genius.lines.length) {
         parsed = { synced: false, lines: genius.lines.map((text) => ({ time: 0, text })), source: 'Genius' };
       }
+      diag.add('lyrics', `Genius: ${parsed ? 'найден' : (genius && genius.url ? `страница ${genius.url}, ${genius.error || 'текста нет'}` : 'песня не найдена в поиске')}`);
     }
     this.loading = false;
     if (!player.current || player.current.key !== t.key) { this.key = null; return this.load(); }
@@ -1692,7 +1774,7 @@ const lyrics = {
     this.lines = parsed.lines.map((line) => ({
       ...line,
       node: el('div', {
-        class: 'lyric', text: line.text || '♪',
+        class: 'lyric' + (!parsed.synced && /^\[.*\]$/.test(line.text.trim()) ? ' tag' : ''), text: line.text || (parsed.synced ? '♪' : '\u00a0'),
         onclick: parsed.synced ? () => { audio.currentTime = line.time; this.update(true); } : null,
       }),
     }));
@@ -1796,6 +1878,7 @@ const sheet = {
     if (!player.current) return;
     fs.hidden = false;
     this.open = true;
+    document.body.classList.add('fs-open');
     fsModes.set(fsModes.current);
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.set(0); this.cover(true); return; }
     // появляется оттуда, где была нижняя панель
@@ -1805,6 +1888,7 @@ const sheet = {
 
   hide(velocity = 0) {
     this.open = false;
+    document.body.classList.remove('fs-open');
     if (document.body.classList.contains('immersive')) setImmersive(false);
     this.cover(false);
     const finish = () => { fs.hidden = true; };
@@ -1881,6 +1965,7 @@ function openTrackMenu(track, anchor) {
     ['Найти похожие', ICON.sparkle, () => router.go('similar', track)],
     ['Перейти к артисту', ICON.user, () => (track.artists.length ? openArtist(track.artists[0]) : openArtistByName(track.artist))],
     ['Текст на Genius', ICON.quote, () => bridge.geniusOpen({ artist: track.artist, title: track.title })],
+    ['Найти версию без цензуры', ICON.search, () => { uncensor.recheck(track); if (player.current && player.current.key === track.key) uncensorDetails.open(track); }],
   ];
   const menu = el('div', { class: 'menu', role: 'menu' },
     el('div', { class: 'menu-head' }, el('div', { class: 'menu-title', text: track.title }), el('div', { class: 'menu-sub', text: track.artist })),
@@ -2054,7 +2139,7 @@ const eq = {
 
   apply() {
     this.filters.forEach((f, i) => { f.gain.value = this.enabled ? this.gains[i] : 0; });
-    $('#eq-btn').classList.toggle('on', this.enabled);
+    $$('.eq-toggle').forEach((b) => b.classList.toggle('on', this.enabled));
     $('#eq-panel').classList.toggle('off', !this.enabled);
   },
 
@@ -2096,19 +2181,24 @@ const eq = {
   },
 };
 
-$('#eq-btn').addEventListener('click', (e) => {
+// эквалайзер открывается и из нижней панели, и из полноэкранного плеера
+$$('.eq-toggle').forEach((btn) => btn.addEventListener('click', (e) => {
   e.stopPropagation();
   const panel = $('#eq-panel');
   panel.hidden = !panel.hidden;
+  panel.classList.toggle('in-fs', sheet.open);
   if (!panel.hidden) eq.render();
-});
+}));
+$('#uc-open').addEventListener('click', () => { $('#eq-panel').hidden = true; uncensorDetails.open(); });
+$('#report-save').addEventListener('click', () => diag.save());
+$$('.uc-status, #uncensored-badge').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); uncensorDetails.open(); }));
 $('#eq-on').addEventListener('change', () => {
   eq.enabled = $('#eq-on').checked;
   eq.save();
   eq.apply();
 });
 document.addEventListener('pointerdown', (e) => {
-  if (!e.target.closest('#eq-panel, #eq-btn')) $('#eq-panel').hidden = true;
+  if (!e.target.closest('#eq-panel, .eq-toggle')) $('#eq-panel').hidden = true;
 });
 
 // --- Подмена зацензуренных треков оригиналом ---------------------------------------------
@@ -2151,15 +2241,24 @@ function similar(a, b) {
 
 const uncensor = {
   enabled: localStorage.getItem('uncensor') !== '0', // включено по умолчанию
-  memo: JSON.parse(localStorage.getItem('uncensorMemo2') || '{}'), // вердикты: ключ трека → версия или null
+  // вердикты: ключ трека → найденная версия или { none: время }; «не найдено» перепроверяем через 3 дня
+  memo: (() => { try { return JSON.parse(localStorage.getItem('uncensorMemo3') || '{}'); } catch { return {}; } })(),
   jobs: new Map(), // идущие проверки
+  status: new Map(), // ход проверки по трекам — для индикатора и подробностей
   decodeCtx: null,
 
+  get(key) {
+    const v = this.memo[key];
+    if (!v) return undefined;
+    if (v.none) return Date.now() - v.none < 3 * 86400e3 ? null : undefined;
+    return v;
+  },
+
   remember(key, value) {
-    this.memo[key] = value;
+    this.memo[key] = value || { none: Date.now() };
     const keys = Object.keys(this.memo);
     if (keys.length > 1500) keys.slice(0, keys.length - 1500).forEach((k) => delete this.memo[k]);
-    localStorage.setItem('uncensorMemo2', JSON.stringify(this.memo));
+    try { localStorage.setItem('uncensorMemo3', JSON.stringify(this.memo)); } catch { /* не страшно */ }
   },
 
   // нужно ли вообще проверять этот трек
@@ -2167,38 +2266,49 @@ const uncensor = {
     return this.enabled && auth.loggedIn && track && !track.explicit && track.isLicensed && track.duration > 30;
   },
 
-  isCandidate(orig, c) {
-    if (c.key === orig.key) return false;
+  // почему кандидат не подходит (или '' — подходит)
+  reject(orig, c) {
+    if (c.key === orig.key) return 'тот же трек';
     const origTag = notOriginalRe.test(`${orig.title} ${orig.subtitle}`);
-    if (!origTag && notOriginalRe.test(`${c.title} ${c.subtitle}`)) return false;
-    if (Math.abs(c.duration - orig.duration) > 4) return false;
+    if (!origTag && notOriginalRe.test(`${c.title} ${c.subtitle}`)) return 'ремикс / другая версия';
+    if (Math.abs(c.duration - orig.duration) > 4) return 'другая длительность';
     const a = baseTitle(orig.title), b = baseTitle(c.title);
-    if (!(b === a || b.startsWith(a + ' ') || similar(a, b) >= 0.85)) return false;
+    if (!(b === a || b.startsWith(a + ' ') || similar(a, b) >= 0.85)) return 'другое название';
     const mainArtist = normText((orig.artists[0] && orig.artists[0].name) || orig.artist.split(/,|&/)[0]);
     const cArtist = normText(c.artist);
-    if (!cArtist.includes(mainArtist) && similar(cArtist, normText(orig.artist)) < 0.8) return false;
+    if (!cArtist.includes(mainArtist) && similar(cArtist, normText(orig.artist)) < 0.8) return 'другой исполнитель';
     // другая лицензионная версия без отметки 18+ — почти наверняка та же цензура
-    if (c.owner_id < 0 && !c.explicit) return false;
-    return true;
+    if (c.owner_id < 0 && !c.explicit) return 'лицензия без 18+';
+    return '';
   },
 
-  async candidates(track) {
+  async candidates(track, st) {
     const artist = (track.artists[0] && track.artists[0].name) || track.artist.split(/,|&/)[0];
     // несколько формулировок запроса: копии пользователи подписывают по-разному
     const base = baseTitle(track.title) || track.title;
-    const queries = [`${artist} ${base}`, `${artist} ${track.title}`, `${track.artist} ${base}`, `${base} ${artist}`, base];
+    const queries = [...new Set([`${artist} ${base}`, `${artist} ${track.title}`, `${track.artist} ${base}`, `${base} ${artist}`, base])];
     const seen = new Map();
-    for (const q of [...new Set(queries)]) {
+    for (const [i, q] of queries.entries()) {
+      st.note = `Поиск копий: запрос ${i + 1} из ${queries.length}`;
+      renderUncensorStatus();
       try {
         const resp = await vk('audio.search', { q, count: 200, auto_complete: 0 }, { cache: false });
         (resp.items || []).map(normTrack).forEach((t) => seen.set(t.key, t));
-      } catch {
-        /* следующий запрос */
+      } catch (err) {
+        diag.add('18+', `поиск «${q}»: ${err.message}`);
       }
     }
     const score = (c) => (c.explicit ? 4 : 0) + (EVIDENCE_RE.test(`${c.title} ${c.subtitle}`) ? 2 : 0)
       + (normText(c.title) !== normText(track.title) ? 1 : 0) - Math.abs(c.duration - track.duration) * 0.1;
-    return [...seen.values()].filter((c) => this.isCandidate(track, c)).sort((a, b) => score(b) - score(a)).slice(0, 12);
+    const reasons = {};
+    const ok = [];
+    for (const c of seen.values()) {
+      const why = this.reject(track, c);
+      if (why) reasons[why] = (reasons[why] || 0) + 1; else ok.push(c);
+    }
+    st.found = seen.size;
+    st.reasons = reasons;
+    return ok.sort((a, b) => score(b) - score(a)).slice(0, 12);
   },
 
   async urlOf(t) {
@@ -2214,38 +2324,66 @@ const uncensor = {
   // карта громкости трека: скачиваем звук, декодируем в 8 кГц (экономно) и считаем уровни
   async envelope(url, maxSeconds = 0) {
     const res = await bridge.audioData(url, maxSeconds);
-    if (!res.ok) throw new Error(res.error);
+    if (!res.ok) throw new Error(res.error || 'не скачался звук');
     if (!this.decodeCtx) this.decodeCtx = new OfflineAudioContext(1, 1, 8000);
     const bytes = res.data;
     const buffer = await this.decodeCtx.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
     return envelopeFromBuffer(buffer);
   },
 
-  // Полная проверка трека. Результат запоминается.
-  analyze(track) {
-    if (!this.applies(track)) return Promise.resolve(null);
-    if (track.key in this.memo) return Promise.resolve(this.memo[track.key]);
+  // Полная проверка трека. Результат запоминается. force — проверить заново по просьбе пользователя.
+  analyze(track, { force = false } = {}) {
+    if (!force && !this.applies(track)) return Promise.resolve(null);
+    if (!force && this.get(track.key) !== undefined) return Promise.resolve(this.get(track.key));
     if (this.jobs.has(track.key)) return this.jobs.get(track.key);
+    const st = { state: 'search', note: 'Поиск копий', done: 0, total: 0, results: [], found: 0, reasons: {} };
+    this.status.set(track.key, st);
+    renderUncensorStatus();
+    const finish = (state, value, note) => {
+      st.state = state;
+      st.note = note;
+      if (state !== 'error') this.remember(track.key, value);
+      diag.add('18+', `${track.artist} — ${track.title}: ${note}`, { found: st.found, reasons: st.reasons, checked: st.results });
+      renderUncensorStatus();
+      return value;
+    };
     const job = (async () => {
-      const list = await this.candidates(track);
-      if (!list.length) { this.remember(track.key, null); return null; }
+      const list = await this.candidates(track, st);
+      if (!list.length) return finish('none', null, `Нет подходящих копий (найдено ${st.found})`);
+      st.state = 'orig';
+      st.note = 'Анализ лицензионной версии';
+      st.total = list.length;
+      renderUncensorStatus();
       const origUrl = await this.urlOf(track);
-      if (!origUrl) return null;
-      const origEnv = await this.envelope(origUrl);
+      if (!origUrl) return finish('error', null, 'Нет доступа к звуку трека');
+      let origEnv;
+      try { origEnv = await this.envelope(origUrl); } catch (err) { return finish('error', null, `Не удалось разобрать звук: ${err.message}`); }
       const PREVIEW_SEC = 45;
+      st.state = 'check';
       // проверка одного кандидата: сначала начало трека, целиком — только если начало совпало
       const check = async (c) => {
-        const url = await this.urlOf(c);
-        if (!url) return false;
+        const row = { title: `${c.artist} — ${c.title}${c.subtitle ? ` (${c.subtitle})` : ''}`, dur: fmt(c.duration), explicit: c.explicit, verdict: '' };
+        st.results.push(row);
         try {
+          const url = await this.urlOf(c);
+          if (!url) { row.verdict = 'нет доступа'; return false; }
           const head = await this.envelope(url, PREVIEW_SEC);
           const quick = compareEnvelopes(origEnv.subarray(0, head.length), head);
-          if (quick.verdict === 'different') return false;
-          if (quick.verdict === 'uncensored') return true;
-          const full = await this.envelope(url);
-          return compareEnvelopes(origEnv, full).verdict === 'uncensored';
-        } catch {
+          row.corr = Math.round(quick.corr * 100) / 100;
+          if (quick.verdict === 'different') { row.verdict = 'другая запись'; return false; }
+          let res = quick;
+          if (quick.verdict !== 'uncensored') res = compareEnvelopes(origEnv, await this.envelope(url));
+          row.corr = Math.round(res.corr * 100) / 100;
+          row.spots = res.spots;
+          row.verdict = { uncensored: 'без цензуры ✓', same: 'та же цензура', different: 'другая запись' }[res.verdict];
+          return res.verdict === 'uncensored';
+        } catch (err) {
+          row.verdict = `ошибка: ${err.message}`;
           return false;
+        } finally {
+          st.done++;
+          st.note = `Проверено ${st.done} из ${st.total}`;
+          renderUncensorStatus();
         }
       };
       // по два кандидата параллельно, по порядку приоритета
@@ -2253,17 +2391,75 @@ const uncensor = {
         const batch = list.slice(i, i + 2);
         const results = await Promise.all(batch.map(check));
         const hit = batch.find((_, j) => results[j]);
-        if (hit) {
-          const found = { key: hit.key, fullId: hit.fullId, title: hit.title, artist: hit.artist };
-          this.remember(track.key, found);
-          return found;
-        }
+        if (hit) return finish('found', { key: hit.key, fullId: hit.fullId, title: hit.title, artist: hit.artist }, `Найдена версия без цензуры: ${hit.artist} — ${hit.title}`);
       }
-      this.remember(track.key, null);
-      return null;
-    })().catch(() => null).finally(() => this.jobs.delete(track.key));
+      return finish('none', null, `Версия без цензуры не найдена (проверено ${st.done})`);
+    })().catch((err) => finish('error', null, `Ошибка: ${err.message}`)).finally(() => this.jobs.delete(track.key));
     this.jobs.set(track.key, job);
     return job;
+  },
+
+  // ручная проверка из меню трека
+  async recheck(track) {
+    if (!auth.loggedIn) { openLogin(); return; }
+    delete this.memo[track.key];
+    toast('Ищем версию без цензуры…');
+    const alt = await this.analyze(track, { force: true });
+    if (player.current && player.current.key === track.key) player.useSubstitute(player.current, alt);
+    if (!alt) toast('Версия без цензуры не найдена', { onClick: () => uncensorDetails.open(track), duration: 4000 });
+  },
+};
+
+// Индикатор поиска оригинала: в нижней панели и в полноэкранном режиме
+function renderUncensorStatus() {
+  const t = player.current;
+  const st = t && uncensor.status.get(t.key);
+  const show = st && (st.state === 'search' || st.state === 'orig' || st.state === 'check' || st.state === 'none' || st.state === 'error');
+  for (const box of $$('.uc-status')) {
+    box.hidden = !show;
+    if (!show) continue;
+    const busy = st.state !== 'none' && st.state !== 'error';
+    box.classList.toggle('busy', busy);
+    box.querySelector('.uc-text').textContent = busy ? `Ищем версию без цензуры · ${st.note}` : st.note;
+    const p = st.state === 'search' ? 0.08 : st.state === 'orig' ? 0.15 : st.total ? 0.15 + 0.85 * (st.done / st.total) : 1;
+    box.style.setProperty('--p', String(busy ? p : 1));
+  }
+  renderSubstitute();
+  if (uncensorDetails.track && t && uncensorDetails.track.key === t.key) uncensorDetails.render();
+}
+
+// Подробности проверки — что нашлось и почему не подошло
+const uncensorDetails = {
+  track: null,
+  open(track = player.current) {
+    if (!track) return;
+    this.track = track;
+    this.close(true);
+    document.body.append(el('div', { class: 'mix-settings-backdrop', id: 'uc-details', onclick: (e) => { if (e.target.id === 'uc-details') this.close(); } },
+      el('div', { class: 'mix-settings uc-details', role: 'dialog' }, el('div', { id: 'uc-body' }))));
+    this.render();
+  },
+  close(silent) { const p = $('#uc-details'); if (p) p.remove(); if (!silent) this.track = null; },
+  render() {
+    const body = $('#uc-body');
+    if (!body || !this.track) return;
+    const t = this.track;
+    const st = uncensor.status.get(t.key);
+    const reasons = st && st.reasons ? Object.entries(st.reasons).map(([k, v]) => `${k}: ${v}`).join(' · ') : '';
+    body.replaceChildren(
+      el('div', { class: 'ms-head' },
+        el('div', { class: 'ms-title', text: 'Версия без цензуры' }),
+        el('button', { class: 'ms-close', title: 'Закрыть', html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>', onclick: () => this.close() })),
+      el('div', { class: 'uc-track', text: `${t.artist} — ${t.title}` }),
+      !uncensor.applies(t) ? el('div', { class: 'uc-note', text: t.explicit ? 'Этот трек уже с отметкой 18+ — обычно он без цензуры.' : !t.isLicensed ? 'Это не лицензионный трек — автоматически не проверяется.' : !uncensor.enabled ? 'Режим подмены выключен.' : '' }) : null,
+      st ? el('div', { class: 'uc-note', text: st.note + (st.found ? ` · найдено копий: ${st.found}` : '') }) : el('div', { class: 'uc-note', text: 'Проверка ещё не запускалась.' }),
+      reasons ? el('div', { class: 'uc-reasons', text: `Отсеяно: ${reasons}` }) : null,
+      st && st.results.length ? el('div', { class: 'uc-list' }, st.results.map((r) => el('div', { class: 'uc-row' + (/✓/.test(r.verdict) ? ' ok' : '') },
+        el('div', { class: 'uc-row-title', text: r.title + (r.explicit ? ' · E' : '') }),
+        el('div', { class: 'uc-row-meta', text: [r.dur, r.verdict || 'проверяется…', r.corr !== undefined ? `сходство ${r.corr}` : '', r.spots ? `мест: ${r.spots}` : ''].filter(Boolean).join(' · ') })))) : null,
+      el('div', { class: 'ms-foot' },
+        el('button', { class: 'btn ghost', text: 'Сохранить отчёт', onclick: () => diag.save() }),
+        el('button', { class: 'btn primary', text: uncensor.jobs.has(t.key) ? 'Идёт проверка…' : 'Проверить заново', disabled: uncensor.jobs.has(t.key), onclick: () => { uncensor.recheck(t); this.render(); } })));
   },
 };
 
@@ -2352,7 +2548,8 @@ document.addEventListener('keydown', (e) => {
   const typing = e.target.closest('input, textarea');
   if (e.key === 'F11') { e.preventDefault(); setImmersive(!document.body.classList.contains('immersive')); return; }
   if (e.key === 'Escape') {
-    if ($('#mix-settings')) mixSettings.close();
+    if ($('#uc-details')) uncensorDetails.close();
+    else if ($('#mix-settings')) mixSettings.close();
     else if (document.body.classList.contains('immersive')) setImmersive(false);
     else if (!$('#eq-panel').hidden) $('#eq-panel').hidden = true;
     else if (!fs.hidden) sheet.hide();

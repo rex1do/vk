@@ -377,11 +377,11 @@ function geniusPage() {
   return geniusWin.webContents;
 }
 
-async function geniusLoad(url, script, timeoutMs = 20000) {
+async function geniusLoad(url, script, timeoutMs = 25000) {
   const wc = geniusPage();
-  await Promise.race([wc.loadURL(url), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs))]);
-  // ждём, пока пройдёт проверка Cloudflare и появится содержимое
-  for (let i = 0; i < 20; i++) {
+  await Promise.race([wc.loadURL(url).catch(() => null), new Promise((r) => setTimeout(r, timeoutMs))]);
+  // ждём, пока пройдёт проверка Cloudflare и появится содержимое (до 30 с)
+  for (let i = 0; i < 60; i++) {
     const result = await wc.executeJavaScript(script, true).catch(() => null);
     if (result) return result;
     await new Promise((r) => setTimeout(r, 500));
@@ -390,46 +390,134 @@ async function geniusLoad(url, script, timeoutMs = 20000) {
 }
 
 const geniusClean = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const firstArtist = (artist) => String(artist || '').split(/,|&| feat\.?| ft\.?| x /i)[0].trim();
+
+async function fetchText(url, accept = 'text/html') {
+  try {
+    const r = await net.fetch(url, { headers: { 'User-Agent': app.userAgentFallback, Accept: accept, 'Accept-Language': 'ru,en;q=0.8' } });
+    return r.ok ? await r.text() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function geniusSearch(q) {
+  const api = `https://genius.com/api/search/multi?q=${encodeURIComponent(q)}`;
+  let text = await fetchText(api, 'application/json');
+  if (!text || text.trimStart()[0] !== '{') {
+    text = await geniusLoad(api, `(() => { try { return JSON.parse(document.body.innerText) && document.body.innerText; } catch { return null; } })()`).catch(() => null);
+  }
+  try {
+    const data = JSON.parse(text);
+    return (data.response.sections || []).flatMap((s) => s.hits || []).filter((h) => h.type === 'song').map((h) => h.result);
+  } catch {
+    return [];
+  }
+}
 
 async function geniusFind({ artist, title }) {
-  const q = `${artist.split(/,|&| feat/i)[0]} ${title.replace(/\(.*?\)|\[.*?\]/g, '')}`.trim();
-  const api = `https://genius.com/api/search/multi?q=${encodeURIComponent(q)}`;
-  let data = null;
-  try {
-    const r = await net.fetch(api, { headers: { 'User-Agent': app.userAgentFallback, Accept: 'application/json' } });
-    if (r.ok) data = await r.json();
-  } catch {
-    data = null;
-  }
-  if (!data) {
-    const text = await geniusLoad(api, `(() => { try { return JSON.parse(document.body.innerText) && document.body.innerText; } catch { return null; } })()`).catch(() => null);
-    data = text ? JSON.parse(text) : null;
-  }
-  if (!data) return null;
-  const hits = (data.response.sections || []).flatMap((s) => s.hits || []).filter((h) => h.type === 'song').map((h) => h.result);
   const wantTitle = geniusClean(title);
-  const wantArtist = geniusClean(artist.split(/,|&| feat/i)[0]);
-  const best = hits.find((h) => geniusClean(h.title).includes(wantTitle) && geniusClean(h.primary_artist && h.primary_artist.name).includes(wantArtist))
-    || hits.find((h) => geniusClean(h.title).includes(wantTitle));
-  return best ? best.url : null;
+  const wantArtist = geniusClean(firstArtist(artist));
+  const titleOk = (h) => {
+    const t = geniusClean(h.title);
+    return t === wantTitle || t.startsWith(wantTitle + ' ') || t.includes(wantTitle);
+  };
+  const artistOk = (h) => {
+    const names = [h.primary_artist && h.primary_artist.name, h.artist_names].map(geniusClean).join(' ');
+    return names.includes(wantArtist);
+  };
+  // сначала «артист + название», потом одно название — Genius иногда пишет артиста иначе
+  for (const q of [`${firstArtist(artist)} ${title.replace(/\(.*?\)|\[.*?\]/g, '')}`.trim(), title.replace(/\(.*?\)|\[.*?\]/g, '').trim()]) {
+    const hits = await geniusSearch(q);
+    const best = hits.find((h) => titleOk(h) && artistOk(h)) || hits.find((h) => artistOk(h) && geniusClean(h.title).split(' ')[0] === wantTitle.split(' ')[0]);
+    if (best) return best.url;
+  }
+  return null;
+}
+
+// Текст со страницы Genius: блоки [data-lyrics-container] без служебных вставок
+// конец <div> с учётом вложенных div: индекс начала закрывающего тега и конца
+function divEnd(html, from) {
+  const tag = /<\/?div\b[^>]*>/g;
+  tag.lastIndex = from;
+  let depth = 1, t;
+  while ((t = tag.exec(html))) {
+    depth += t[0][1] === '/' ? -1 : 1;
+    if (!depth) return { close: t.index, after: tag.lastIndex };
+  }
+  return null;
+}
+
+function geniusParseHtml(html) {
+  const parts = [];
+  const re = /<div[^>]*data-lyrics-container="true"[^>]*>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const end = divEnd(html, re.lastIndex);
+    if (!end) break;
+    let chunk = html.slice(re.lastIndex, end.close);
+    // служебные блоки (заголовок «N Contributors … Lyrics») вырезаем целиком
+    for (let x; (x = /<div[^>]*data-exclude-from-selection="true"[^>]*>/.exec(chunk));) {
+      const e = divEnd(chunk, x.index + x[0].length);
+      chunk = chunk.slice(0, x.index) + (e ? chunk.slice(e.after) : '');
+    }
+    parts.push(chunk);
+    re.lastIndex = end.after;
+  }
+  if (!parts.length) return null;
+  const decode = (x) => x.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&quot;/g, '"').replace(/&apos;|&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+  return decode(parts.join('\n').replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ''));
+}
+
+function cleanLyricLines(text) {
+  const lines = String(text).split('\n').map((l) => l.trim())
+    .filter((l) => !/^\[(текст песни|lyrics)(\s|$)[^\]]*\]$/i.test(l) && !/^\d+\s+contributors?/i.test(l) && !/^translations?$/i.test(l));
+  while (lines.length && !lines[0]) lines.shift();
+  return lines.filter((l, i, arr) => l || (arr[i - 1] && arr[i - 1].trim()));
 }
 
 async function geniusLyrics(info) {
   const url = await geniusFind(info);
   if (!url) return null;
-  const text = await geniusLoad(url, `(() => {
-    const boxes = [...document.querySelectorAll('[data-lyrics-container="true"]')];
-    if (!boxes.length) return null;
-    return boxes.map((b) => {
-      const c = b.cloneNode(true);
-      c.querySelectorAll('[data-exclude-from-selection="true"]').forEach((x) => x.remove());
-      c.querySelectorAll('br').forEach((br) => br.replaceWith('\\n'));
-      return c.textContent;
-    }).join('\\n');
-  })()`);
-  if (!text) return null;
-  const lines = text.split('\n').map((l) => l.trim()).filter((l, i, arr) => l || (arr[i - 1] && arr[i - 1].trim()));
-  return { url, lines };
+  let text = null;
+  const html = await fetchText(url);
+  if (html) text = geniusParseHtml(html);
+  if (!text) {
+    text = await geniusLoad(url, `(() => {
+      const boxes = [...document.querySelectorAll('[data-lyrics-container="true"]')];
+      if (!boxes.length) return null;
+      return boxes.map((b) => {
+        const c = b.cloneNode(true);
+        c.querySelectorAll('[data-exclude-from-selection="true"]').forEach((x) => x.remove());
+        c.querySelectorAll('br').forEach((br) => br.replaceWith('\\n'));
+        return c.textContent;
+      }).join('\\n');
+    })()`);
+  }
+  if (!text) return { url, lines: null, error: 'страница Genius не открылась' };
+  const lines = cleanLyricLines(text);
+  return lines.length ? { url, lines } : { url, lines: null, error: 'на странице Genius нет текста' };
+}
+
+// LRCLIB — открытая база текстов, часто с привязкой ко времени (как в Spotify)
+async function lrclibLyrics({ artist, title, duration }) {
+  const clean = geniusClean;
+  const wantTitle = clean(title), wantArtist = clean(firstArtist(artist));
+  for (const q of [`${firstArtist(artist)} ${title.replace(/\(.*?\)|\[.*?\]/g, '')}`, title.replace(/\(.*?\)|\[.*?\]/g, '')]) {
+    const text = await fetchText(`https://lrclib.net/api/search?q=${encodeURIComponent(q.trim())}`, 'application/json');
+    let items = [];
+    try { items = JSON.parse(text) || []; } catch { items = []; }
+    const ok = items.filter((x) => {
+      const t = clean(x.trackName);
+      return (t === wantTitle || t.startsWith(wantTitle + ' ')) && clean(x.artistName).includes(wantArtist)
+        && (!duration || !x.duration || Math.abs(x.duration - duration) <= 6) && (x.syncedLyrics || x.plainLyrics);
+    });
+    const best = ok.find((x) => x.syncedLyrics) || ok[0];
+    if (best) return { synced: best.syncedLyrics || null, plain: best.plainLyrics || null };
+  }
+  return null;
 }
 
 // --- Окно ----------------------------------------------------------------------------------
@@ -588,9 +676,23 @@ ipcMain.handle('audio-data', async (_e, url, maxSeconds) => {
 ipcMain.handle('genius-lyrics', async (_e, info) => {
   try {
     return await geniusLyrics(info);
+  } catch (err) {
+    return { lines: null, error: String(err && err.message || err) };
+  }
+});
+ipcMain.handle('lrclib-lyrics', async (_e, info) => {
+  try {
+    return await lrclibLyrics(info);
   } catch {
     return null;
   }
+});
+// отчёт для разработчика — без токенов и ссылок, только то, что приложение видело
+ipcMain.handle('save-report', async (_e, text) => {
+  const file = path.join(app.getPath('downloads'), `vkplayer-report-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`);
+  fs.writeFileSync(file, String(text));
+  shell.showItemInFolder(file);
+  return file;
 });
 ipcMain.handle('genius-open', async (_e, info) => {
   let url = null;
