@@ -673,12 +673,36 @@ async function chartFromAccount() {
     }
     return null;
   };
-  for (const url of ['https://vk.ru/audio?block=chart', 'https://vk.com/audio?block=chart', 'https://vk.ru/audio?section=explore', 'https://vk.ru/audio']) {
+  for (const url of ['https://vk.ru/audio?block=chart', 'https://vk.ru/music/chart', 'https://vk.ru/audio?section=explore']) {
     try {
       const found = accept(await scan(await vk('catalog.getAudio', { url, need_blocks: 1 }), 1, url), url);
       if (found) return found;
     } catch (err) { diag.add('chart', `${url}: ${err.message}`); }
   }
+  // чарт как официальный плейлист «Чарт VK Музыки»
+  const fromPlaylist = async (p, where) => {
+    const resp = await vk('audio.get', { owner_id: p.owner_id, album_id: p.id, access_key: p.access_key || '', count: 200 });
+    const tracks = (resp.items || []).map(normTrack);
+    diag.add('chart', `плейлист ${where}: «${p.title}», ${tracks.length} треков`, tracks.slice(0, 5).map((t) => `${t.artist} — ${t.title}`));
+    return tracks.length ? { id: null, blocks: [{ kind: 'tracks', title: p.title, tracks }] } : null;
+  };
+  const chartPlaylist = (items) => (items || []).filter((p) => /^чарт\s+vk/i.test(p.title || '') && p.owner_id < 0)
+    .sort((a, b) => (b.update_time || 0) - (a.update_time || 0))[0];
+  for (const owner of [-137360741, -147845620]) {
+    try {
+      const resp = await vk('audio.getPlaylists', { owner_id: owner, count: 100 });
+      diag.add('chart', `плейлисты ${owner}`, (resp.items || []).slice(0, 30).map((p) => `${p.title} (${p.count})`));
+      const p = chartPlaylist(resp.items);
+      if (p) { const found = await fromPlaylist(p, `сообщества ${owner}`); if (found) return found; }
+    } catch (err) { diag.add('chart', `плейлисты ${owner}: ${err.message}`); }
+  }
+  try {
+    const resp = await vk('audio.searchPlaylists', { q: 'Чарт VK Музыки', count: 30 });
+    diag.add('chart', 'поиск плейлиста «Чарт VK Музыки»', (resp.items || []).map((p) => `${p.title} · ${p.owner_id} · ${p.count} · ${p.update_time ? new Date(p.update_time * 1000).toISOString().slice(0, 10) : ''}`));
+    const p = chartPlaylist(resp.items);
+    if (p) { const found = await fromPlaylist(p, 'из поиска'); if (found) return found; }
+  } catch (err) { diag.add('chart', `поиск плейлиста: ${err.message}`); }
+
   // раздел чарта из публичного каталога, но открытый от имени аккаунта
   try {
     const guest = await vk('catalog.getAudio', { url: 'https://vk.ru/audio?block=chart', need_blocks: 1 }, { anonymous: true });
@@ -1209,7 +1233,7 @@ const player = {
     track.substitute = { ...alt, url: altUrl };
     renderSubstitute();
     this.attach(altUrl, id, track, false, audio.currentTime);
-    toast('Включена версия без цензуры');
+    toast(alt.manual ? 'Включена выбранная версия' : 'Включена версия без цензуры');
   },
 
   attach(url, id, track, retried = false, startAt = 0) {
@@ -2262,24 +2286,32 @@ const uncensor = {
   },
 
   // нужно ли вообще проверять этот трек
+  // отметке 18+ у лицензии не верим: ВК ставит её и зацензуренным версиям
   applies(track) {
-    return this.enabled && auth.loggedIn && track && !track.explicit && track.isLicensed && track.duration > 30;
+    return this.enabled && auth.loggedIn && track && track.isLicensed && track.duration > 30;
   },
 
-  // почему кандидат не подходит (или '' — подходит)
-  reject(orig, c) {
+  // почему кандидат не подходит (или '' — подходит). Длительность проверяем мягко:
+  // у копий она бывает указана неверно, а точный ответ всё равно даст сравнение звука.
+  reject(orig, c, { strict = true } = {}) {
     if (c.key === orig.key) return 'тот же трек';
+    const tags = `${c.title} ${c.subtitle} ${c.artist}`;
     const origTag = notOriginalRe.test(`${orig.title} ${orig.subtitle}`);
-    if (!origTag && notOriginalRe.test(`${c.title} ${c.subtitle}`)) return 'ремикс / другая версия';
-    if (Math.abs(c.duration - orig.duration) > 4) return 'другая длительность';
+    if (!origTag && (notOriginalRe.test(`${c.title} ${c.subtitle}`) || /\d\s*hz\b|bass|басс/i.test(tags))) return 'ремикс / другая версия';
     const a = baseTitle(orig.title), b = baseTitle(c.title);
     if (!(b === a || b.startsWith(a + ' ') || similar(a, b) >= 0.85)) return 'другое название';
     const mainArtist = normText((orig.artists[0] && orig.artists[0].name) || orig.artist.split(/,|&/)[0]);
     const cArtist = normText(c.artist);
     if (!cArtist.includes(mainArtist) && similar(cArtist, normText(orig.artist)) < 0.8) return 'другой исполнитель';
-    // другая лицензионная версия без отметки 18+ — почти наверняка та же цензура
-    if (c.owner_id < 0 && !c.explicit) return 'лицензия без 18+';
+    if (strict && this.durationOff(orig, c)) return 'другая длительность';
     return '';
+  },
+
+  // длительность: ±12 с подходит; явно неверная (в разы больше/меньше) — тоже проверяем
+  durationOff(orig, c) {
+    const d = Math.abs(c.duration - orig.duration);
+    const broken = c.duration > orig.duration * 1.6 || c.duration < orig.duration * 0.6;
+    return d > 12 && !broken;
   },
 
   async candidates(track, st) {
@@ -2298,17 +2330,23 @@ const uncensor = {
         diag.add('18+', `поиск «${q}»: ${err.message}`);
       }
     }
-    const score = (c) => (c.explicit ? 4 : 0) + (EVIDENCE_RE.test(`${c.title} ${c.subtitle}`) ? 2 : 0)
-      + (normText(c.title) !== normText(track.title) ? 1 : 0) - Math.abs(c.duration - track.duration) * 0.1;
+    // приоритет: загрузки пользователей, пометки «без цензуры», та же длительность
+    const score = (c) => (c.owner_id > 0 ? 3 : 0) + (EVIDENCE_RE.test(`${c.title} ${c.subtitle}`) ? 2 : 0)
+      + (normText(c.title) !== normText(track.title) ? 1 : 0)
+      - Math.min(Math.abs(c.duration - track.duration), 30) * 0.15;
     const reasons = {};
     const ok = [];
+    const pool = [];
     for (const c of seen.values()) {
       const why = this.reject(track, c);
       if (why) reasons[why] = (reasons[why] || 0) + 1; else ok.push(c);
+      // для окна подробностей: все копии этой песни, даже отсеянные по длительности
+      if (!this.reject(track, c, { strict: false }) || why === 'другая длительность' || why === 'ремикс / другая версия') pool.push({ track: c, why });
     }
     st.found = seen.size;
     st.reasons = reasons;
-    return ok.sort((a, b) => score(b) - score(a)).slice(0, 12);
+    st.pool = pool.filter((x) => x.why !== 'тот же трек').sort((x, y) => score(y.track) - score(x.track)).slice(0, 40);
+    return ok.sort((a, b) => score(b) - score(a)).slice(0, 14);
   },
 
   async urlOf(t) {
@@ -2321,14 +2359,14 @@ const uncensor = {
     }
   },
 
-  // карта громкости трека: скачиваем звук, декодируем в 8 кГц (экономно) и считаем уровни
-  async envelope(url, maxSeconds = 0) {
+  // звук трека: скачиваем, декодируем в моно 8 кГц (для сравнения волн этого достаточно)
+  async samples(url, maxSeconds = 0) {
     const res = await bridge.audioData(url, maxSeconds);
     if (!res.ok) throw new Error(res.error || 'не скачался звук');
     if (!this.decodeCtx) this.decodeCtx = new OfflineAudioContext(1, 1, 8000);
     const bytes = res.data;
     const buffer = await this.decodeCtx.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-    return envelopeFromBuffer(buffer);
+    return monoFromBuffer(buffer);
   },
 
   // Полная проверка трека. Результат запоминается. force — проверить заново по просьбе пользователя.
@@ -2343,7 +2381,11 @@ const uncensor = {
       st.state = state;
       st.note = note;
       if (state !== 'error') this.remember(track.key, value);
-      diag.add('18+', `${track.artist} — ${track.title}: ${note}`, { found: st.found, reasons: st.reasons, checked: st.results });
+      diag.add('18+', `${track.artist} — ${track.title} (${fmt(track.duration)}): ${note}`, {
+        found: st.found, reasons: st.reasons,
+        checked: st.results.map(({ track: _t, ...r }) => r),
+        others: (st.pool || []).slice(0, 15).map((x) => `${x.track.artist} — ${x.track.title} ${fmt(x.track.duration)} ${x.why || ''}`),
+      });
       renderUncensorStatus();
       return value;
     };
@@ -2356,25 +2398,27 @@ const uncensor = {
       renderUncensorStatus();
       const origUrl = await this.urlOf(track);
       if (!origUrl) return finish('error', null, 'Нет доступа к звуку трека');
-      let origEnv;
-      try { origEnv = await this.envelope(origUrl); } catch (err) { return finish('error', null, `Не удалось разобрать звук: ${err.message}`); }
+      let orig;
+      try { orig = await this.samples(origUrl); } catch (err) { return finish('error', null, `Не удалось разобрать звук: ${err.message}`); }
       const PREVIEW_SEC = 45;
       st.state = 'check';
       // проверка одного кандидата: сначала начало трека, целиком — только если начало совпало
       const check = async (c) => {
-        const row = { title: `${c.artist} — ${c.title}${c.subtitle ? ` (${c.subtitle})` : ''}`, dur: fmt(c.duration), explicit: c.explicit, verdict: '' };
+        const row = { title: `${c.artist} — ${c.title}${c.subtitle ? ` (${c.subtitle})` : ''}`, dur: fmt(c.duration), explicit: c.explicit, verdict: '', track: c };
         st.results.push(row);
         try {
           const url = await this.urlOf(c);
           if (!url) { row.verdict = 'нет доступа'; return false; }
-          const head = await this.envelope(url, PREVIEW_SEC);
-          const quick = compareEnvelopes(origEnv.subarray(0, head.length), head);
+          // начало кандидата сравниваем с началом лицензии (+12 с на возможный сдвиг)
+          const head = await this.samples(url, PREVIEW_SEC);
+          const quick = compareAudio(orig.subarray(0, head.length + 12 * 8000), head);
           row.corr = Math.round(quick.corr * 100) / 100;
           if (quick.verdict === 'different') { row.verdict = 'другая запись'; return false; }
           let res = quick;
-          if (quick.verdict !== 'uncensored') res = compareEnvelopes(origEnv, await this.envelope(url));
+          if (quick.verdict !== 'uncensored') res = compareAudio(orig, await this.samples(url));
           row.corr = Math.round(res.corr * 100) / 100;
           row.spots = res.spots;
+          row.shift = Math.round(res.lag * 10) / 10;
           row.verdict = { uncensored: 'без цензуры ✓', same: 'та же цензура', different: 'другая запись' }[res.verdict];
           return res.verdict === 'uncensored';
         } catch (err) {
@@ -2397,6 +2441,29 @@ const uncensor = {
     })().catch((err) => finish('error', null, `Ошибка: ${err.message}`)).finally(() => this.jobs.delete(track.key));
     this.jobs.set(track.key, job);
     return job;
+  },
+
+  // пользователь сам выбрал версию в окне подробностей: играем её с той же секунды и запоминаем
+  async pick(track, cand) {
+    const found = { key: cand.key, fullId: cand.fullId, title: cand.title, artist: cand.artist, manual: true };
+    this.remember(track.key, found);
+    const st = this.status.get(track.key);
+    if (st) { st.state = 'found'; st.note = `Выбрано вручную: ${cand.artist} — ${cand.title}`; }
+    if (player.current && player.current.key === track.key) await player.useSubstitute(player.current, found);
+    else toast('Эта версия будет играть вместо лицензии');
+    renderUncensorStatus();
+  },
+
+  // вернуть лицензионную версию
+  async unpick(track) {
+    this.remember(track.key, null);
+    if (player.current && player.current.key === track.key && player.current.substitute) {
+      player.current.substitute = null;
+      renderSubstitute();
+      player.attach(player.current.url, player.loadId, player.current, false, audio.currentTime);
+      toast('Включена лицензионная версия');
+    }
+    renderUncensorStatus();
   },
 
   // ручная проверка из меню трека
@@ -2445,21 +2512,38 @@ const uncensorDetails = {
     if (!body || !this.track) return;
     const t = this.track;
     const st = uncensor.status.get(t.key);
+    const current = player.current && player.current.key === t.key ? player.current.substitute : null;
     const reasons = st && st.reasons ? Object.entries(st.reasons).map(([k, v]) => `${k}: ${v}`).join(' · ') : '';
-    body.replaceChildren(
+    const row = (cand, meta, cls = '') => el('button', {
+      class: 'uc-row' + cls + (current && current.key === cand.key ? ' playing' : ''),
+      title: 'Включить эту версию с того же места',
+      onclick: () => uncensor.pick(t, cand),
+    },
+    el('span', { class: 'uc-play', html: ICON.play }),
+    el('span', { class: 'uc-row-text' },
+      el('span', { class: 'uc-row-title', text: `${cand.artist} — ${cand.title}${cand.subtitle ? ` (${cand.subtitle})` : ''}${cand.explicit ? ' · E' : ''}` }),
+      el('span', { class: 'uc-row-meta', text: meta })));
+    const checkedKeys = new Set(st ? st.results.filter((r) => r.track).map((r) => r.track.key) : []);
+    const others = st && st.pool ? st.pool.filter((x) => !checkedKeys.has(x.track.key)) : [];
+    body.replaceChildren(...[
       el('div', { class: 'ms-head' },
         el('div', { class: 'ms-title', text: 'Версия без цензуры' }),
         el('button', { class: 'ms-close', title: 'Закрыть', html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>', onclick: () => this.close() })),
-      el('div', { class: 'uc-track', text: `${t.artist} — ${t.title}` }),
-      !uncensor.applies(t) ? el('div', { class: 'uc-note', text: t.explicit ? 'Этот трек уже с отметкой 18+ — обычно он без цензуры.' : !t.isLicensed ? 'Это не лицензионный трек — автоматически не проверяется.' : !uncensor.enabled ? 'Режим подмены выключен.' : '' }) : null,
-      st ? el('div', { class: 'uc-note', text: st.note + (st.found ? ` · найдено копий: ${st.found}` : '') }) : el('div', { class: 'uc-note', text: 'Проверка ещё не запускалась.' }),
+      el('div', { class: 'uc-track', text: `${t.artist} — ${t.title} · ${fmt(t.duration)}` }),
+      !uncensor.applies(t) && !st ? el('div', { class: 'uc-note', text: !t.isLicensed ? 'Это не лицензионный трек — автоматически не проверяется.' : !uncensor.enabled ? 'Режим подмены выключен.' : 'Проверка ещё не запускалась.' }) : null,
+      st ? el('div', { class: 'uc-note', text: st.note + (st.found ? ` · найдено копий: ${st.found}` : '') }) : null,
+      current ? el('div', { class: 'uc-note' }, `Сейчас играет: ${current.artist} — ${current.title}. `, el('button', { class: 'link-btn', text: 'Вернуть лицензию', onclick: () => uncensor.unpick(t) })) : null,
       reasons ? el('div', { class: 'uc-reasons', text: `Отсеяно: ${reasons}` }) : null,
-      st && st.results.length ? el('div', { class: 'uc-list' }, st.results.map((r) => el('div', { class: 'uc-row' + (/✓/.test(r.verdict) ? ' ok' : '') },
-        el('div', { class: 'uc-row-title', text: r.title + (r.explicit ? ' · E' : '') }),
-        el('div', { class: 'uc-row-meta', text: [r.dur, r.verdict || 'проверяется…', r.corr !== undefined ? `сходство ${r.corr}` : '', r.spots ? `мест: ${r.spots}` : ''].filter(Boolean).join(' · ') })))) : null,
+      st && st.results.length ? el('div', { class: 'uc-label', text: 'Проверены по звуку' }) : null,
+      st && st.results.length ? el('div', { class: 'uc-list' }, st.results.filter((r) => r.track).map((r) => row(r.track,
+        [r.dur, r.verdict || 'проверяется…', r.corr !== undefined ? `совпадение ${Math.round(r.corr * 100)}%` : '', r.spots ? `мест цензуры: ${r.spots}` : '', r.shift ? `сдвиг ${r.shift} с` : ''].filter(Boolean).join(' · '),
+        /✓/.test(r.verdict) ? ' ok' : ''))) : null,
+      others.length ? el('div', { class: 'uc-label', text: 'Другие копии — можно включить вручную' }) : null,
+      others.length ? el('div', { class: 'uc-list' }, others.map((x) => row(x.track, [fmt(x.track.duration), x.why || 'не проверялась'].join(' · ')))) : null,
       el('div', { class: 'ms-foot' },
         el('button', { class: 'btn ghost', text: 'Сохранить отчёт', onclick: () => diag.save() }),
-        el('button', { class: 'btn primary', text: uncensor.jobs.has(t.key) ? 'Идёт проверка…' : 'Проверить заново', disabled: uncensor.jobs.has(t.key), onclick: () => { uncensor.recheck(t); this.render(); } })));
+        el('button', { class: 'btn primary', text: uncensor.jobs.has(t.key) ? 'Идёт проверка…' : 'Проверить заново', disabled: uncensor.jobs.has(t.key), onclick: () => { uncensor.recheck(t); this.render(); } })),
+    ].filter(Boolean));
   },
 };
 
