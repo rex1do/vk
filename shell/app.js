@@ -675,33 +675,38 @@ async function chartFromAccount() {
   };
   for (const url of ['https://vk.ru/audio?block=chart', 'https://vk.ru/music/chart', 'https://vk.ru/audio?section=explore']) {
     try {
-      const found = accept(await scan(await vk('catalog.getAudio', { url, need_blocks: 1 }), 1, url), url);
+      const found = accept(await scan(await vk('catalog.getAudio', { url, need_blocks: 1 }), 0, url), url);
       if (found) return found;
     } catch (err) { diag.add('chart', `${url}: ${err.message}`); }
   }
-  // чарт как официальный плейлист «Чарт VK Музыки»
+  // чарт как плейлист официальных сообществ VK Музыки (фанатские копии из поиска не берём)
   const fromPlaylist = async (p, where) => {
     const resp = await vk('audio.get', { owner_id: p.owner_id, album_id: p.id, access_key: p.access_key || '', count: 200 });
     const tracks = (resp.items || []).map(normTrack);
     diag.add('chart', `плейлист ${where}: «${p.title}», ${tracks.length} треков`, tracks.slice(0, 5).map((t) => `${t.artist} — ${t.title}`));
     return tracks.length ? { id: null, blocks: [{ kind: 'tracks', title: p.title, tracks }] } : null;
   };
-  const chartPlaylist = (items) => (items || []).filter((p) => /^чарт\s+vk/i.test(p.title || '') && p.owner_id < 0)
-    .sort((a, b) => (b.update_time || 0) - (a.update_time || 0))[0];
-  for (const owner of [-137360741, -147845620]) {
+  for (const owner of [-147845620, -137360741]) {
     try {
-      const resp = await vk('audio.getPlaylists', { owner_id: owner, count: 100 });
-      diag.add('chart', `плейлисты ${owner}`, (resp.items || []).slice(0, 30).map((p) => `${p.title} (${p.count})`));
-      const p = chartPlaylist(resp.items);
+      const all = [];
+      for (let offset = 0; offset < 600; offset += 100) {
+        const resp = await vk('audio.getPlaylists', { owner_id: owner, count: 100, offset });
+        all.push(...(resp.items || []));
+        if (!(resp.items || []).length || all.length >= (resp.count || 0)) break;
+      }
+      const charts = all.filter((p) => /чарт|chart/i.test(p.title || ''));
+      diag.add('chart', `плейлисты ${owner}: всего ${all.length}, с «чарт»: ${charts.length}`, charts.map((p) => `${p.title} (${p.count})`));
+      const p = charts.sort((x, y) => (y.update_time || 0) - (x.update_time || 0))[0];
       if (p) { const found = await fromPlaylist(p, `сообщества ${owner}`); if (found) return found; }
     } catch (err) { diag.add('chart', `плейлисты ${owner}: ${err.message}`); }
   }
+  // популярное во ВКонтакте — то, что сейчас слушают больше всего
   try {
-    const resp = await vk('audio.searchPlaylists', { q: 'Чарт VK Музыки', count: 30 });
-    diag.add('chart', 'поиск плейлиста «Чарт VK Музыки»', (resp.items || []).map((p) => `${p.title} · ${p.owner_id} · ${p.count} · ${p.update_time ? new Date(p.update_time * 1000).toISOString().slice(0, 10) : ''}`));
-    const p = chartPlaylist(resp.items);
-    if (p) { const found = await fromPlaylist(p, 'из поиска'); if (found) return found; }
-  } catch (err) { diag.add('chart', `поиск плейлиста: ${err.message}`); }
+    const resp = await vk('audio.getPopular', { count: 100, only_eng: 0 });
+    const tracks = (Array.isArray(resp) ? resp : resp.items || []).map(normTrack);
+    diag.add('chart', `audio.getPopular: ${tracks.length}`, tracks.slice(0, 10).map((t) => `${t.artist} — ${t.title}`));
+    if (tracks.length) return { id: null, popular: true, blocks: [{ kind: 'tracks', title: 'Популярное', tracks }] };
+  } catch (err) { diag.add('chart', `audio.getPopular: ${err.message}`); }
 
   // раздел чарта из публичного каталога, но открытый от имени аккаунта
   try {
@@ -715,6 +720,45 @@ async function chartFromAccount() {
   return null;
 }
 
+// Блок раздела «Обзор» аккаунта по имени (block=new_songs и т.п.), открытый целиком
+async function accountExploreBlock(name) {
+  const resp = await vk('catalog.getAudio', { url: 'https://vk.ru/audio?section=explore', need_blocks: 1 });
+  const sections = (resp.catalog && resp.catalog.sections) || [];
+  for (const sec of sections) {
+    let blocks = sec.blocks || [];
+    if (!blocks.length && /обзор/i.test(sec.title || '')) {
+      try { blocks = ((await vk('catalog.getSection', { section_id: sec.id })).section || {}).blocks || []; } catch { blocks = []; }
+    }
+    const i = blocks.findIndex((b) => new RegExp(`[?&]block=${name}(&|$)`).test(b.url || ''));
+    if (i < 0) continue;
+    const block = blocks[i];
+    let id = block.meta && block.meta.show_all_info && block.meta.show_all_info.section_id;
+    for (let j = i - 1; !id && j >= 0 && j >= i - 2; j--) {
+      const action = (blocks[j].actions || []).find((a) => a.section_id);
+      if (action) id = action.section_id;
+    }
+    diag.add('catalog', `блок ${name} в «${sec.title}»: ${id ? 'раздел целиком' : 'только блок'}`);
+    if (id) return parseCatalog(await vk('catalog.getSection', { section_id: id }));
+    return parseCatalog(resp, { ...sec, blocks: [block] });
+  }
+  diag.add('catalog', `блок ${name} в «Обзоре» не найден`);
+  return null;
+}
+
+async function viewNew() {
+  let data = null;
+  if (auth.loggedIn) {
+    try { data = await accountExploreBlock('new_songs'); } catch (err) { diag.add('catalog', `новинки: ${err.message}`); }
+  }
+  const block = data && data.blocks.find((b) => b.kind === 'tracks');
+  if (!block) return viewPublicList('https://vk.ru/audio?block=new_songs', 'Открыть новое', 'Новинки');
+  const tracks = block.tracks;
+  return [
+    pageHead('Открыть новое', 'Новинки', tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
+    pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom),
+  ];
+}
+
 async function viewChart() {
   const data = auth.loggedIn ? await chartFromAccount() : null;
   if (!data) {
@@ -725,7 +769,7 @@ async function viewChart() {
   const tracks = block.tracks;
   tracks.forEach((t, i) => { if (!t.chart) t.chart = { position: i + 1, state: '' }; });
   return [
-    pageHead('Открыть новое', 'Чарт VK Музыки', tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
+    pageHead(data.popular ? 'Популярное во ВКонтакте' : 'Открыть новое', data.popular ? 'Популярное сейчас' : 'Чарт VK Музыки', tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
     pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom),
   ];
 }
@@ -902,7 +946,7 @@ const ROUTES = {
   recs: viewRecs,
   playlists: viewPlaylists,
   chart: () => viewChart(),
-  new: () => viewPublicList('https://vk.ru/audio?block=new_songs', 'Открыть новое', 'Новинки'),
+  new: () => viewNew(),
   section: viewSection,
   playlist: viewPlaylist,
   search: viewSearch,
@@ -1212,7 +1256,9 @@ const player = {
       const altUrl = await uncensor.urlOf(known);
       if (id !== this.loadId) return;
       if (altUrl) { track.substitute = { ...known, url: altUrl }; playUrl = altUrl; }
-      uncensor.status.set(track.key, { state: 'found', found: known, results: [], done: 0, total: 0 });
+      if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
+    } else if (uncensor.applies(track) && uncensor.get(track.key) === null) {
+      if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
     } else if (uncensor.applies(track)) {
       uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id));
     }
@@ -2287,12 +2333,15 @@ const uncensor = {
   get(key) {
     const v = this.memo[key];
     if (!v) return undefined;
-    if (v.none) return Date.now() - v.none < 3 * 86400e3 ? null : undefined;
+    if (v.none) return v.manual || Date.now() - v.none < 3 * 86400e3 ? null : undefined;
     return v;
   },
 
-  remember(key, value) {
-    this.memo[key] = value || { none: Date.now() };
+  // value — найденная версия или null; alts — все проверенные копии (чтобы переключаться и потом)
+  remember(key, value, alts) {
+    const prev = this.memo[key];
+    const keep = alts || (prev && prev.alts) || [];
+    this.memo[key] = { ...(value || { none: Date.now() }), alts: keep };
     const keys = Object.keys(this.memo);
     if (keys.length > 1500) keys.slice(0, keys.length - 1500).forEach((k) => delete this.memo[k]);
     try { localStorage.setItem('uncensorMemo4', JSON.stringify(this.memo)); } catch { /* не страшно */ }
@@ -2393,7 +2442,15 @@ const uncensor = {
     const finish = (state, value, note) => {
       st.state = state;
       st.note = note;
-      if (state !== 'error') this.remember(track.key, value);
+      const code = (v) => (/✓/.test(v) ? 'ok' : /та же/.test(v) ? 'same' : /другая/.test(v) ? 'diff' : '');
+      const checked = st.results.filter((r) => r.track);
+      const seen = new Set(checked.map((r) => r.track.key));
+      const alts = [
+        ...checked.map((r) => ({ t: r.track, verdict: code(r.verdict), corr: r.corr, spots: r.spots })),
+        ...(st.pool || []).filter((x) => !seen.has(x.track.key) && !x.why).map((x) => ({ t: x.track, verdict: '' })),
+      ].slice(0, 14).map(({ t, ...r }) => ({ key: t.key, fullId: t.fullId, title: t.title, subtitle: t.subtitle, artist: t.artist, duration: t.duration, explicit: t.explicit, ...r }));
+      if (state !== 'error') this.remember(track.key, value, alts);
+      if (state === 'none') setTimeout(() => { st.quiet = true; renderUncensorStatus(); }, 6000);
       diag.add('18+', `${track.artist} — ${track.title} (${fmt(track.duration)}): ${note}`, {
         found: st.found, reasons: st.reasons,
         checked: st.results.map(({ track: _t, ...r }) => r),
@@ -2456,20 +2513,36 @@ const uncensor = {
     return job;
   },
 
+  // состояние для окна версий, когда проверка уже была раньше
+  statusFromMemo(track) {
+    const v = this.memo[track.key];
+    if (!v) return null;
+    const results = (v.alts || []).map((x) => ({
+      track: { ...x, owner_id: Number(String(x.key).split('_')[0]), url: '', subtitle: x.subtitle || '' },
+      dur: fmt(x.duration), verdict: x.verdict, corr: x.corr, spots: x.spots, explicit: x.explicit,
+    }));
+    const note = v.none ? (v.manual ? 'Выбрана лицензионная версия' : 'Версия без цензуры не найдена')
+      : v.manual ? 'Версия выбрана вручную' : 'Найдена версия без цензуры';
+    return { state: v.none ? 'none' : 'found', quiet: true, note, results, done: results.length, total: results.length, found: 0, reasons: {} };
+  },
+
   // пользователь сам выбрал версию в окне подробностей: играем её с той же секунды и запоминаем
   async pick(track, cand) {
     const found = { key: cand.key, fullId: cand.fullId, title: cand.title, artist: cand.artist, manual: true };
     this.remember(track.key, found);
     const st = this.status.get(track.key);
-    if (st) { st.state = 'found'; st.note = `Выбрано вручную: ${cand.artist} — ${cand.title}`; }
+    if (st) { st.state = 'found'; st.quiet = true; st.note = 'Версия выбрана вручную'; }
     if (player.current && player.current.key === track.key) await player.useSubstitute(player.current, found);
     else toast('Эта версия будет играть вместо лицензии');
     renderUncensorStatus();
+    if (uncensorDetails.track) uncensorDetails.render();
   },
 
   // вернуть лицензионную версию
   async unpick(track) {
-    this.remember(track.key, null);
+    this.remember(track.key, { none: Date.now(), manual: true });
+    const st = this.status.get(track.key);
+    if (st) { st.state = 'none'; st.quiet = true; st.note = 'Выбрана лицензионная версия'; }
     if (player.current && player.current.key === track.key && player.current.substitute) {
       player.current.substitute = null;
       renderSubstitute();
@@ -2477,6 +2550,7 @@ const uncensor = {
       toast('Включена лицензионная версия');
     }
     renderUncensorStatus();
+    if (uncensorDetails.track) uncensorDetails.render();
   },
 
   // ручная проверка из меню трека
@@ -2494,7 +2568,7 @@ const uncensor = {
 function renderUncensorStatus() {
   const t = player.current;
   const st = t && uncensor.status.get(t.key);
-  const show = st && (st.state === 'search' || st.state === 'orig' || st.state === 'check' || st.state === 'none' || st.state === 'error');
+  const show = st && !st.quiet && (st.state === 'search' || st.state === 'orig' || st.state === 'check' || st.state === 'none' || st.state === 'error');
   for (const box of $$('.uc-status')) {
     box.hidden = !show;
     if (!show) continue;
@@ -2524,38 +2598,65 @@ const uncensorDetails = {
     const body = $('#uc-body');
     if (!body || !this.track) return;
     const t = this.track;
-    const st = uncensor.status.get(t.key);
-    const current = player.current && player.current.key === t.key ? player.current.substitute : null;
-    const reasons = st && st.reasons ? Object.entries(st.reasons).map(([k, v]) => `${k}: ${v}`).join(' · ') : '';
-    const row = (cand, meta, cls = '') => el('button', {
-      class: 'uc-row' + cls + (current && current.key === cand.key ? ' playing' : ''),
-      title: 'Включить эту версию с того же места',
-      onclick: () => uncensor.pick(t, cand),
+    const st = uncensor.status.get(t.key) || uncensor.statusFromMemo(t);
+    const busy = uncensor.jobs.has(t.key);
+    const isCurrent = player.current && player.current.key === t.key;
+    const memo = uncensor.memo[t.key];
+    // какая версия выбрана сейчас: играющая подмена, иначе — запомненная, иначе — лицензия
+    const activeKey = (isCurrent && player.current.substitute && player.current.substitute.key) || (memo && !memo.none && memo.key) || t.key;
+    const BADGE = { ok: ['Без цензуры', 'ok'], same: ['Та же цензура', 'muted'], diff: ['Другая запись', 'muted'] };
+    const code = (v) => (/✓/.test(v || '') || v === 'ok' ? 'ok' : /та же/.test(v || '') || v === 'same' ? 'same' : /другая/.test(v || '') || v === 'diff' ? 'diff' : '');
+    const option = ({ key, title, sub, badge, meta, onclick }) => el('button', {
+      class: 'vp-opt' + (key === activeKey ? ' active' : '') + (badge && badge[1] === 'ok' ? ' good' : ''),
+      onclick,
     },
-    el('span', { class: 'uc-play', html: ICON.play }),
-    el('span', { class: 'uc-row-text' },
-      el('span', { class: 'uc-row-title', text: `${cand.artist} — ${cand.title}${cand.subtitle ? ` (${cand.subtitle})` : ''}${cand.explicit ? ' · E' : ''}` }),
-      el('span', { class: 'uc-row-meta', text: meta })));
-    const checkedKeys = new Set(st ? st.results.filter((r) => r.track).map((r) => r.track.key) : []);
-    const others = st && st.pool ? st.pool.filter((x) => !checkedKeys.has(x.track.key)) : [];
+    el('span', { class: 'vp-radio' }),
+    el('span', { class: 'vp-text' },
+      el('span', { class: 'vp-title', text: title }),
+      el('span', { class: 'vp-sub' }, sub, meta ? el('span', { class: 'vp-meta', text: meta }) : null)),
+    badge ? el('span', { class: 'vp-badge ' + badge[1], text: badge[0] }) : null);
+
+    const rows = (st ? st.results : []).filter((r) => r.track && r.track.key !== t.key);
+    const order = { ok: 0, '': 1, same: 2, diff: 3 };
+    rows.sort((x, y) => order[code(x.verdict)] - order[code(y.verdict)]);
+    const checkedKeys = new Set(rows.map((r) => r.track.key));
+    const others = st && st.pool ? st.pool.filter((x) => x.track.key !== t.key && !checkedKeys.has(x.track.key)) : [];
+    const good = rows.filter((r) => code(r.verdict) === 'ok').length;
+    const progress = busy && st ? (st.state === 'check' && st.total ? 0.15 + 0.85 * (st.done / st.total) : st.state === 'orig' ? 0.15 : 0.06) : 0;
+    const statusText = busy ? (st ? st.note : 'Ищем…') : good ? `${good} ${plural(good, 'версия', 'версии', 'версий')} без цензуры` : st ? st.note : 'Проверка ещё не запускалась';
+    const versionRow = (cand, verdict, extra) => option({
+      key: cand.key,
+      title: cand.title + (cand.subtitle ? ` (${cand.subtitle})` : ''),
+      sub: cand.artist,
+      meta: [fmt(cand.duration), extra].filter(Boolean).join(' · '),
+      badge: BADGE[code(verdict)] || ['Не проверялась', 'muted'],
+      onclick: () => uncensor.pick(t, cand),
+    });
+
     body.replaceChildren(...[
-      el('div', { class: 'ms-head' },
-        el('div', { class: 'ms-title', text: 'Версия без цензуры' }),
+      el('div', { class: 'vp-head' },
+        el('img', { class: 'vp-cover', src: t.cover ? t.cover(135) || '' : '', alt: '' }),
+        el('div', { class: 'vp-head-text' },
+          el('div', { class: 'vp-kicker', text: 'Версии трека' }),
+          el('div', { class: 'vp-name', text: t.title }),
+          el('div', { class: 'vp-artist', text: `${t.artist} · ${fmt(t.duration)}` })),
         el('button', { class: 'ms-close', title: 'Закрыть', html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>', onclick: () => this.close() })),
-      el('div', { class: 'uc-track', text: `${t.artist} — ${t.title} · ${fmt(t.duration)}` }),
-      !uncensor.applies(t) && !st ? el('div', { class: 'uc-note', text: !t.isLicensed ? 'Это не лицензионный трек — автоматически не проверяется.' : !uncensor.enabled ? 'Режим подмены выключен.' : 'Проверка ещё не запускалась.' }) : null,
-      st ? el('div', { class: 'uc-note', text: st.note + (st.found ? ` · найдено копий: ${st.found}` : '') }) : null,
-      current ? el('div', { class: 'uc-note' }, `Сейчас играет: ${current.artist} — ${current.title}. `, el('button', { class: 'link-btn', text: 'Вернуть лицензию', onclick: () => uncensor.unpick(t) })) : null,
-      reasons ? el('div', { class: 'uc-reasons', text: `Отсеяно: ${reasons}` }) : null,
-      st && st.results.length ? el('div', { class: 'uc-label', text: 'Проверены по звуку' }) : null,
-      st && st.results.length ? el('div', { class: 'uc-list' }, st.results.filter((r) => r.track).map((r) => row(r.track,
-        [r.dur, r.verdict || 'проверяется…', r.corr !== undefined ? `совпадение ${Math.round(r.corr * 100)}%` : '', r.spots ? `мест цензуры: ${r.spots}` : '', r.shift ? `сдвиг ${r.shift} с` : ''].filter(Boolean).join(' · '),
-        /✓/.test(r.verdict) ? ' ok' : ''))) : null,
-      others.length ? el('div', { class: 'uc-label', text: 'Другие копии — можно включить вручную' }) : null,
-      others.length ? el('div', { class: 'uc-list' }, others.map((x) => row(x.track, [fmt(x.track.duration), x.why || 'не проверялась'].join(' · ')))) : null,
-      el('div', { class: 'ms-foot' },
-        el('button', { class: 'btn ghost', text: 'Сохранить отчёт', onclick: () => diag.save() }),
-        el('button', { class: 'btn primary', text: uncensor.jobs.has(t.key) ? 'Идёт проверка…' : 'Проверить заново', disabled: uncensor.jobs.has(t.key), onclick: () => { uncensor.recheck(t); this.render(); } })),
+      el('div', { class: 'vp-status' + (busy ? ' busy' : good ? ' good' : '') },
+        el('span', { class: 'vp-dot' }),
+        el('span', { text: statusText }),
+        busy ? el('span', { class: 'vp-progress' }, el('i', { style: `width:${Math.round(progress * 100)}%` })) : null),
+      el('div', { class: 'vp-list' },
+        option({
+          key: t.key, title: 'Лицензия ВКонтакте', sub: 'Версия площадки, может быть с цензурой', badge: null,
+          onclick: () => uncensor.unpick(t),
+        }),
+        rows.map((r) => versionRow(r.track, r.verdict, r.spots ? `мест цензуры: ${r.spots}` : ''))),
+      others.length ? el('details', { class: 'vp-more' },
+        el('summary', { text: `Ещё копии (${others.length}) — не проверялись` }),
+        el('div', { class: 'vp-list' }, others.map((x) => versionRow(x.track, '', x.why || '')))) : null,
+      el('div', { class: 'vp-foot' },
+        el('button', { class: 'link-btn', text: busy ? 'Идёт проверка…' : 'Искать заново', disabled: busy, onclick: () => { uncensor.recheck(t); this.render(); } }),
+        el('button', { class: 'link-btn', text: 'Сохранить отчёт', onclick: () => diag.save() })),
     ].filter(Boolean));
   },
 };
