@@ -99,6 +99,24 @@ const CACHEABLE = /^(catalog\.|audio\.(get|getPlaylists|getPlaylistById|getRecom
 const apiCache = new Map();
 const CACHE_TTL = 3 * 60 * 1000;
 
+// Поиск ВК строго ограничен: при частых запросах он требует капчу и может мешать остальным.
+// Поисковые запросы идут по одному с паузой; после капчи поиск оригиналов отдыхает.
+let searchChain = Promise.resolve();
+let searchCooldownUntil = 0;
+function searchThrottled(params) {
+  const run = searchChain.then(async () => {
+    if (Date.now() < searchCooldownUntil) throw Object.assign(new Error('Поиск временно на паузе (ВК попросил капчу)'), { code: 14 });
+    const res = await vk('audio.search', params, { cache: false });
+    await new Promise((r) => setTimeout(r, 1100));
+    return res;
+  });
+  searchChain = run.catch((err) => {
+    if (/captcha|flood/i.test(err.message) || err.code === 14 || err.code === 9) searchCooldownUntil = Date.now() + 3 * 60e3;
+    return new Promise((r) => setTimeout(r, 1100));
+  });
+  return run;
+}
+
 async function vk(method, params = {}, { cache = CACHEABLE.test(method), anonymous = false } = {}) {
   const key = cache ? (anonymous ? 'anon:' : '') + method + JSON.stringify(params) : null;
   if (key) {
@@ -1338,7 +1356,7 @@ const crossfade = {
       const curve = to > from ? Math.sin(k * Math.PI / 2) : Math.cos((1 - k) * Math.PI / 2);
       d.fade = from + (to - from) * curve;
       applyVolume(d);
-      if (k >= 1) { clearInterval(d.fadeTimer); if (done) done(); }
+      if (k >= 1) { clearInterval(d.fadeTimer); d.fadeTimer = 0; if (done) done(); }
     }, 30);
   },
 };
@@ -1456,11 +1474,11 @@ const player = {
     if (!track) return;
     if (this.mix) this.extendMix();
     const id = ++this.loadId;
-    // плавный переход: при автопереходе — заданная длительность, при ручном переключении — коротко
-    const wasPlaying = this.current && !audio.paused && deck().currentTime > 0.5;
-    const fadeSec = this.pendingFade || (crossfade.enabled && wasPlaying ? 1.2 : 0);
+    // плавный переход — только при автоматической смене трека в конце; ручное переключение мгновенное
+    const fadeSec = this.pendingFade;
     this.pendingFade = 0;
     if (fadeSec > 0) this.swapDeck(fadeSec);
+    else { const d = deck(); clearInterval(d.fadeTimer); d.fadeTimer = 0; d.pausing = false; d.fade = 1; applyVolume(d); }
     this.current = track;
     renderNowPlaying();
     this.markRows();
@@ -1488,12 +1506,16 @@ const player = {
       } else if (!known.manual) {
         // запомненная копия больше недоступна — ищем заново, пока играет лицензия
         delete uncensor.memo[track.key];
-        uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id));
+        setTimeout(() => { if (id === this.loadId) uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id)); }, 4000);
       }
     } else if (uncensor.applies(track) && uncensor.get(track.key) === null) {
       if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
     } else if (uncensor.applies(track)) {
-      uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id));
+      // проверяем, только если трек слушают дольше нескольких секунд (не при быстром перелистывании)
+      setTimeout(() => {
+        if (id !== this.loadId) return;
+        uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id));
+      }, 4000);
     } else if (uncensor.enabled && auth.loggedIn) {
       diag.add('18+', `${track.artist} — ${track.title}: автопоиск пропущен (${!track.isLicensed ? 'не лицензия' : track.duration <= 30 ? 'короткий' : 'нет условия'})`);
     }
@@ -1529,7 +1551,7 @@ const player = {
         maxMaxBufferLength: 60,
         backBufferLength: 30, // по умолчанию hls.js хранит весь прослушанный трек в памяти
       });
-      this.hls = hls;
+      this.hlsDeck[deckIdx] = hls;
       hls.on(Hls.Events.ERROR, async (_e, data) => {
         if (!data.fatal || id !== this.loadId) return;
         // ссылка протухла — спрашиваем свежую и пробуем ещё раз
@@ -1555,35 +1577,42 @@ const player = {
     }
     if (!wasPaused) audio.play().catch(() => {});
     const d = deck();
-    if (this.fadeInNext) { crossfade.fade(d, 1, this.fadeInNext); this.fadeInNext = 0; } else if (d.fade !== 1 && !d.fadeTimer) { d.fade = 1; applyVolume(d); }
+    if (this.fadeInNext) { crossfade.fade(d, 1, this.fadeInNext); this.fadeInNext = 0; }
   },
 
-  destroyHls() {
-    if (this.hls) {
-      this.hls.destroy();
-      this.hls = null;
+  // у каждой деки свой загрузчик потока; на одном <audio> двух загрузчиков быть не должно
+  hlsDeck: [null, null],
+  get hls() { return this.hlsDeck[deckIdx]; },
+  destroyHls(i = deckIdx) {
+    if (this.hlsDeck[i]) {
+      this.hlsDeck[i].destroy();
+      this.hlsDeck[i] = null;
     }
   },
 
   // Переход на другую деку: старая затихает за sec секунд и останавливается, новая начинает с тишины
   swapDeck(sec) {
-    const old = deck();
-    const oldHls = this.hls;
-    this.hls = null;
+    const oldIdx = deckIdx;
+    const old = decks[oldIdx];
     deckIdx = 1 - deckIdx;
     const fresh = deck();
+    // новая дека могла ещё доигрывать прошлый переход — останавливаем её полностью
     clearInterval(fresh.fadeTimer);
+    fresh.fadeTimer = 0;
+    fresh.pause();
+    this.destroyHls(deckIdx);
     fresh.fade = 0;
     applyVolume(fresh);
     this.fadeInNext = sec;
     crossfade.fade(old, 0, sec, () => {
-      if (old === deck()) return; // уже снова активна (быстрые переключения)
+      if (deckIdx === oldIdx) return; // уже снова активна
       old.pause();
-      if (oldHls) oldHls.destroy();
+      this.destroyHls(oldIdx);
       old.removeAttribute('src');
       old.load();
     });
   },
+
 
   skipBroken() {
     this.skips += 1;
@@ -1625,14 +1654,23 @@ const player = {
   toggle() {
     if (!this.current) return;
     const d = deck();
-    if (audio.paused) {
-      if (crossfade.enabled) { clearInterval(d.fadeTimer); d.fade = 0; applyVolume(d); }
-      audio.play().catch(() => {});
-      if (crossfade.enabled) crossfade.fade(d, 1, 0.35);
-    } else if (crossfade.enabled) {
-      crossfade.fade(d, 0, 0.3, () => { if (d === deck()) { d.pause(); d.fade = 1; applyVolume(d); } });
+    const soft = crossfade.enabled && !this.fadeInNext;
+    if (d.paused || d.pausing) {
+      // нажали «играть» (в том числе пока звук ещё затихал) — продолжаем с плавным нарастанием
+      d.pausing = false;
+      if (soft) { if (d.paused) { d.fade = 0; applyVolume(d); } crossfade.fade(d, 1, 0.3); } else { d.fade = 1; applyVolume(d); }
+      d.play().catch(() => {});
+    } else if (soft) {
+      d.pausing = true;
+      crossfade.fade(d, 0, 0.25, () => {
+        if (!d.pausing) return;
+        d.pausing = false;
+        d.pause();
+        d.fade = 1;
+        applyVolume(d);
+      });
     } else {
-      audio.pause();
+      d.pause();
     }
   },
 
@@ -2805,18 +2843,22 @@ const uncensor = {
     const artist = (track.artists[0] && track.artists[0].name) || track.artist.split(/,|&/)[0];
     // несколько формулировок запроса: копии пользователи подписывают по-разному
     const base = baseTitle(track.title) || track.title;
-    const queries = [...new Set([`${artist} ${base}`, `${artist} ${track.title}`, `${track.artist} ${base}`, `${base} ${artist}`, base])];
+    const queries = [...new Set([`${artist} ${base}`, `${track.artist} ${base}`, base].map((q) => q.trim()))];
     const seen = new Map();
+    let failed = 0;
     for (const [i, q] of queries.entries()) {
       st.note = `Поиск копий: запрос ${i + 1} из ${queries.length}`;
       renderUncensorStatus();
       try {
-        const resp = await vk('audio.search', { q, count: 200, auto_complete: 0 }, { cache: false });
+        const resp = await searchThrottled({ q, count: 200, auto_complete: 0 });
         (resp.items || []).map(normTrack).forEach((t) => seen.set(t.key, t));
       } catch (err) {
+        failed++;
         diag.add('18+', `поиск «${q}»: ${err.message}`);
       }
     }
+    // поиск не сработал вовсе (капча, нет сети) — это не «оригинала нет», проверим позже
+    if (failed === queries.length) throw new Error('поиск ВК сейчас недоступен');
     // приоритет: загрузки пользователей, пометки «без цензуры», та же длительность
     const score = (c) => (c.owner_id > 0 ? 3 : 0) + (EVIDENCE_RE.test(`${c.title} ${c.subtitle}`) ? 2 : 0)
       + (normText(c.title) !== normText(track.title) ? 1 : 0)
@@ -2847,7 +2889,7 @@ const uncensor = {
     } catch { /* поищем */ }
     for (const q of [`${t.artist} ${t.title}`, t.title]) {
       try {
-        const resp = await vk('audio.search', { q, count: 100, auto_complete: 0 }, { cache: false });
+        const resp = await searchThrottled({ q, count: 100, auto_complete: 0 });
         const hit = (resp.items || []).find((a) => `${a.owner_id}_${a.id}` === t.key && a.url);
         if (hit) return hit.url; // в запомненную версию ссылку не пишем — она живёт недолго
       } catch { /* следующий запрос */ }

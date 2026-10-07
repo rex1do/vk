@@ -807,7 +807,6 @@ body:not(.is-playing) .fullscreen .fs-cover { transform: perspective(900px) scal
 /* --- Полноэкранный: жидкий фон --- */
 .fs-liquid { position: absolute; inset: -10%; width: 120%; height: 120%; filter: blur(48px) saturate(1.25); opacity: .95; }
 .fs-bg:has(.fs-liquid) .fs-bg-layer { display: none; }
-.fs-bg-shade { z-index: 1; }
 
 /* --- Полноэкранный: интерфейс прячется без движения мыши --- */
 .fs-top, .fs-actions, .fs-controls, .fs-volume, .fs-progress .time, .fs-panel .qcards-hint, body.fs-open .window-buttons, .fs-info .uc-status { transition: opacity .6s ease; }
