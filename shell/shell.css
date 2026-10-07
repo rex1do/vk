@@ -269,6 +269,8 @@ body.is-playing .row.playing .eq { display: flex; }
 .card:hover .card-play { opacity: 1; transform: none; }
 .card-title { margin-top: 11px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-sub { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-meta { color: var(--faint); font-size: 12px; margin-top: 3px; white-space: nowrap; }
+.card-kind { display: inline-block; padding: 1px 7px; border-radius: 6px; background: rgba(255,255,255,.08); color: var(--muted); font-weight: 650; font-size: 11px; }
 
 /* шапка плейлиста */
 .hero { display: flex; gap: 30px; align-items: flex-end; margin: 4px 0 28px; }

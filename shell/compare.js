@@ -93,50 +93,150 @@ function fineLag(a, b, ea, approx, range = 600) {
   return best.lag;
 }
 
+// Низкие частоты (до ~1,5 кГц): их перекодирование и небольшая разница скорости почти не портят
+function lowpass(x) {
+  const y = new Float32Array(x.length);
+  let s = 0;
+  for (let i = 0; i < x.length; i++) { s += x[i] - (i >= 4 ? x[i - 4] : 0); y[i] = s / 4; }
+  const z = new Float32Array(x.length);
+  s = 0;
+  for (let i = 0; i < y.length; i++) { s += y[i] - (i >= 4 ? y[i - 4] : 0); z[i] = s / 4; }
+  return z;
+}
+
+// Сдвиг по ходу трека: копии бывают чуть быстрее/медленнее (2:07 и 2:05) или с другими паузами.
+// Сдвиг ищется каждые 2,5 с около предыдущего, между точками — плавно.
+const CHUNK = 2.5 * 8000;
+function trackLags(a, b, ea, startLag) {
+  const PROBE = 4000;
+  const points = []; // [центр куска, сдвиг]
+  let lag = startLag;
+  const loud = median(ea);
+  for (let c = 0; c * CHUNK < a.length; c++) {
+    let from = -1, best = -1;
+    for (let w = Math.floor(c * CHUNK / WIN); w < Math.min(ea.length, Math.floor((c * CHUNK + CHUNK - PROBE) / WIN)); w++) {
+      if (ea[w] > best) { best = ea[w]; from = w * WIN; }
+    }
+    if (from >= 0 && best > loud * 0.3 && from + PROBE <= a.length) {
+      const range = c === 0 ? 800 : 450;
+      let top = { lag, score: -Infinity };
+      for (let l = lag - range; l <= lag + range; l++) {
+        if (from + l < 0 || from + PROBE + l > b.length) continue;
+        let sum = 0, bb = 0;
+        for (let i = from, e = from + PROBE; i < e; i++) { const y = b[i + l]; sum += a[i] * y; bb += y * y; }
+        const score = bb > 0 ? sum / Math.sqrt(bb) : -Infinity;
+        if (score > top.score) top = { lag: l, score };
+      }
+      lag = top.lag;
+      points.push([from + PROBE / 2, lag]);
+    }
+  }
+  if (!points.length) points.push([0, startLag]);
+  return (pos) => {
+    if (pos <= points[0][0]) return points[0][1];
+    for (let k = 1; k < points.length; k++) {
+      if (pos <= points[k][0]) {
+        const [x0, y0] = points[k - 1], [x1, y1] = points[k];
+        return Math.round(y0 + (y1 - y0) * (pos - x0) / (x1 - x0));
+      }
+    }
+    return points[points.length - 1][1];
+  };
+}
+
 /* licensed — лицензионная (возможно, зацензуренная) версия, other — кандидат.
    Оба — моно Float32Array 8 кГц. Возвращает
-   { verdict, corr (доля совпавших окон), spots (мест цензуры), lag (сдвиг, с) }. */
-function compareAudio(licensed, other, { maxShiftSec = 12 } = {}) {
+   { verdict, corr (доля совпавших окон), spots (мест цензуры), lag (сдвиг, с), level (громкость кандидата в местах отличий) }. */
+// Растяжение сигнала в f раз (линейная интерполяция)
+function stretch(x, f) {
+  const n = Math.floor(x.length * f);
+  const y = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = i / f, k = Math.floor(p), t = p - k;
+    y[i] = k + 1 < x.length ? x[k] * (1 - t) + x[k + 1] * t : x[x.length - 1];
+  }
+  return y;
+}
+
+// Если копия чуть быстрее/медленнее (другая скорость, 2:07 и 2:05), подбираем множитель по громкости
+function guessSpeed(a, b) {
+  const ea = envelope(a), eb = envelope(b);
+  let best = { f: 1, corr: coarseLag(ea, eb, 12).corr };
+  for (let f = 0.97; f <= 1.0301; f += 0.002) {
+    if (Math.abs(f - 1) < 0.001) continue;
+    const c = coarseLag(ea, envelope(stretch(b, f)), 12).corr;
+    if (c > best.corr + 0.02) best = { f, corr: c };
+  }
+  return best.f;
+}
+
+function compareAudio(licensedRaw, otherRaw, opts = {}) {
+  const first = compareOnce(licensedRaw, otherRaw, opts);
+  if (first.verdict !== 'different' || opts.noSpeed) return first;
+  const f = guessSpeed(licensedRaw, otherRaw);
+  if (f === 1) return first;
+  const second = compareOnce(licensedRaw, stretch(otherRaw, f), opts);
+  return second.verdict === 'different' ? first : { ...second, speed: f };
+}
+
+function compareOnce(licensedRaw, otherRaw, { maxShiftSec = 12 } = {}) {
+  const licensed = lowpass(licensedRaw), other = lowpass(otherRaw);
   const ea = envelope(licensed), eb = envelope(other);
   if (ea.length < 60 || eb.length < 60) return { verdict: 'different', corr: 0, spots: 0, lag: 0 };
   const coarse = coarseLag(ea, eb, maxShiftSec);
-  const lag = fineLag(licensed, other, ea, coarse.lag * WIN);
+  const start = fineLag(licensed, other, ea, coarse.lag * WIN);
+  const lagAt = trackLags(licensed, other, ea, start);
 
   const quietA = median(ea) * 0.05, quietB = median(eb) * 0.05;
-  const loudB = median(eb) * 0.2;
-  const total = Math.floor((Math.min(licensed.length, other.length - lag) - Math.max(0, -lag)) / WIN);
-  const startA = Math.max(0, -lag);
-  // окна у краёв (вступление, концовка) не считаем: там копии часто обрезаны иначе
-  const edge = 60; // 3 с
-  const marks = new Int8Array(Math.max(0, total)); // 1 — совпало, -1 — лицензия отличается, 0 — тишина/край
+  const total = ea.length;
+  const edge = 60; // 3 с по краям не считаем: копии часто обрезаны иначе
+  const marks = new Int8Array(total); // 1 — совпало, -1 — отличается
+  const rA = new Float32Array(total), rB = new Float32Array(total);
   let matched = 0, counted = 0;
-  for (let w = 0; w < total; w++) {
-    const i0 = startA + w * WIN;
+  for (let w = edge; w < total - edge; w++) {
+    const i0 = w * WIN;
+    const lag = lagAt(i0 + WIN / 2);
+    if (i0 + lag < 0 || i0 + WIN + lag > other.length) continue;
     let ab = 0, aa = 0, bb = 0;
     for (let i = i0, e = i0 + WIN; i < e; i++) {
       const x = licensed[i], y = other[i + lag];
       ab += x * y; aa += x * x; bb += y * y;
     }
     const ra = Math.sqrt(aa / WIN), rb = Math.sqrt(bb / WIN);
-    if (ra < quietA && rb < quietB) continue; // тишина в обеих
-    if (w < edge || w >= total - edge) continue;
+    rA[w] = ra; rB[w] = rb;
+    if (ra < quietA && rb < quietB) continue;
     counted++;
     const ncc = aa > 0 && bb > 0 ? ab / Math.sqrt(aa * bb) : 0;
-    if (ncc > 0.6) { marks[w] = 1; matched++; } else if (rb > loudB) marks[w] = -1; // у кандидата здесь звук есть
+    // та же запись совпадает почти идеально; бит без голоса или другой микс — заметно хуже
+    if (ncc > 0.85) { marks[w] = 1; matched++; } else marks[w] = -1;
   }
   const share = counted ? matched / counted : 0;
-  if (share < 0.55) return { verdict: 'different', corr: share, spots: 0, lag: lag / RATE };
+  const lagSec = lagAt(0) / RATE;
+  if (share < 0.5) return { verdict: 'different', corr: share, spots: 0, lag: lagSec };
 
-  // места цензуры: подряд ≥ 3 окон (150 мс) несовпадения, разрывы в 1 окно допускаются
+  // громкость кандидата относительно лицензии там, где совпадает, и там, где отличается
+  const ratios = [], diffRatios = [];
+  for (let w = 0; w < total; w++) {
+    if (!rA[w]) continue;
+    if (marks[w] === 1) ratios.push(rB[w] / rA[w]);
+    else if (marks[w] === -1) diffRatios.push(rB[w] / rA[w]);
+  }
+  const gain = median(ratios) || 1;
+  // цензура: в лицензии слово заглушено (кандидат громче) или перевёрнуто (вровень);
+  // если в местах отличий кандидат тише — в нём нет голоса (бит, минус), это другая запись
+  const level = diffRatios.length ? median(diffRatios) / gain : 1;
+
+  // места: подряд ≥ 3 окон (150 мс) несовпадения, разрыв в 1 окно допускается
   let spots = 0, spotWindows = 0, run = 0, gap = 0;
   const close = () => { if (run >= 3 && run <= 80) { spots++; spotWindows += run; } run = 0; gap = 0; };
   for (let w = 0; w < total; w++) {
-    if (marks[w] === -1) { run++; gap = 0; } else if (run && gap < 1 && marks[w] !== 1) { gap++; } else if (run) close();
+    if (marks[w] === -1) { run++; gap = 0; } else if (run && gap < 1 && marks[w] === 0) { gap++; } else if (run) close();
   }
   close();
   const spotShare = counted ? spotWindows / counted : 0;
+  if (spots >= 1 && level < 0.92) return { verdict: 'different', corr: share, spots, lag: lagSec, level };
   const verdict = spots >= 1 && spotShare < 0.35 ? 'uncensored' : 'same';
-  return { verdict, corr: share, spots, lag: lag / RATE };
+  return { verdict, corr: share, spots, lag: lagSec, level };
 }
 
 // для совместимости со старым кодом: карта громкости из AudioBuffer

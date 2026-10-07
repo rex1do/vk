@@ -154,6 +154,16 @@ function normTrack(a) {
   };
 }
 
+// Тип релиза: ВК иногда прямо пишет его в данных, иначе определяем по числу треков
+function releaseKind(p) {
+  const raw = String((p.album && p.album.type) || p.album_type || '').toLowerCase();
+  if (raw === 'single') return 'Сингл';
+  if (raw === 'ep') return 'EP';
+  if (raw === 'album') return 'Альбом';
+  if (raw) return raw.toUpperCase();
+  return '';
+}
+
 function normPlaylist(p) {
   const o = p.original || {};
   const photo = p.photo || (p.thumbs && p.thumbs[0]) || null;
@@ -166,6 +176,8 @@ function normPlaylist(p) {
     sub: artists || (p.year ? `${p.year}` : '') || (p.count ? tracksWord(p.count) : ''),
     count: p.count || 0,
     isAlbum: p.type === 'album',
+    kind: releaseKind(p),
+    year: p.year || '',
     cover: (size) => pickPhoto(photo, size),
   };
 }
@@ -468,7 +480,8 @@ function playlistCard(p) {
         onclick: (e) => { e.stopPropagation(); playPlaylist(p); },
       })),
     el('div', { class: 'card-title', text: p.title }),
-    el('div', { class: 'card-sub', text: p.sub }));
+    el('div', { class: 'card-sub', text: p.sub }),
+    p.kind ? el('div', { class: 'card-meta' }, el('span', { class: 'card-kind', text: p.kind }), p.year ? ` · ${p.year}` : '') : null);
 }
 
 function sectionHead(title, action) {
@@ -896,13 +909,66 @@ async function loadAllMy(onProgress = () => {}) {
   return tracks;
 }
 
+// «Перемешать всё» как в ВК: играть сразу, без загрузки всей медиатеки.
+// Если ВК умеет отдавать перемешанный список сам (audio.get с shuffle) — берём его,
+// иначе начинаем со случайной сотни, а остальное подмешиваем в очередь фоном.
 async function playAllMy(shuffle) {
   if (!auth.loggedIn) { openLogin(); return; }
-  toast('Загружаем все треки…', { duration: 60000 });
-  const tracks = await loadAllMy((n, total) => toast(`Загружаем треки: ${n} из ${total}`, { duration: 60000 }));
-  if (!tracks.length) { toast('Не удалось загрузить треки'); return; }
-  toast(shuffle ? `Перемешано ${tracksWord(tracks.length)}` : `В очереди ${tracksWord(tracks.length)}`);
-  player.playList(tracks, 0, { shuffle });
+  const uid = auth.me && auth.me.id;
+  if (!shuffle) {
+    const first = await vk('audio.get', { owner_id: uid, count: MY_PAGE, offset: 0 });
+    const tracks = (first.items || []).map(normTrack);
+    if (!tracks.length) return;
+    player.playList(tracks, 0, { shuffle: false });
+    appendRestMy(tracks, false);
+    return;
+  }
+  let start = [];
+  try {
+    const [plain, mixed] = await Promise.all([
+      vk('audio.get', { owner_id: uid, count: 30, offset: 0 }),
+      vk('audio.get', { owner_id: uid, count: MY_PAGE, offset: 0, shuffle: 1 }, { cache: false }),
+    ]);
+    const a = (plain.items || []).slice(0, 15).map((x) => x.id).join();
+    const b = (mixed.items || []).slice(0, 15).map((x) => x.id).join();
+    if (a !== b && (mixed.items || []).length) {
+      start = mixed.items.map(normTrack);
+      diag.add('my', 'перемешивание: ВК отдаёт перемешанный список сам');
+    } else {
+      const total = plain.count || 0;
+      const offset = Math.max(0, Math.floor(Math.random() * Math.max(1, total - MY_PAGE)));
+      const page = await vk('audio.get', { owner_id: uid, count: MY_PAGE, offset });
+      start = (page.items || []).map(normTrack);
+      diag.add('my', `перемешивание: начинаем со случайной сотни (с ${offset} из ${total})`);
+    }
+  } catch (err) {
+    toast('Не удалось загрузить треки');
+    return;
+  }
+  if (!start.length) return;
+  for (let i = start.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [start[i], start[j]] = [start[j], start[i]]; }
+  player.playList(start, 0, { shuffle: false });
+  player.setShuffle(true);
+  appendRestMy(start, true);
+}
+
+// остальные треки медиатеки догружаются в фоне и добавляются в очередь (вразброс, если перемешано)
+async function appendRestMy(queue, mixed) {
+  const all = await loadAllMy().catch(() => []);
+  if (player.queue !== queue) return; // пользователь уже включил другое
+  const have = new Set(queue.map((t) => t.key));
+  const rest = all.filter((t) => !have.has(t.key));
+  for (const t of rest) {
+    queue.push(t);
+    const idx = queue.length - 1;
+    if (mixed) {
+      const at = player.pos + 1 + Math.floor(Math.random() * (player.order.length - player.pos));
+      player.order.splice(at, 0, idx);
+    } else {
+      player.order.push(idx);
+    }
+  }
+  renderQueue();
 }
 
 async function viewMy() {
@@ -1034,6 +1100,7 @@ const ROUTES = {
   my: viewMy,
   recs: viewRecs,
   playlists: viewPlaylists,
+  history: viewHistory,
   chart: () => viewChart(),
   new: () => viewNew(),
   section: viewSection,
@@ -1490,7 +1557,55 @@ const player = {
   },
 };
 
+// История прослушиваний (хранится на этом компьютере)
+const listenHistory = {
+  items: (() => { try { return JSON.parse(localStorage.getItem('history') || '[]'); } catch { return []; } })(),
+  lastKey: null,
+  add(t) {
+    if (!t || t.key === this.lastKey) return;
+    this.lastKey = t.key;
+    const raw = {
+      id: t.id, owner_id: t.owner_id, access_key: t.access_key, title: t.title, subtitle: t.subtitle, artist: t.artist,
+      main_artists: t.artists, duration: t.duration, is_explicit: t.explicit, is_licensed: t.isLicensed, album: { thumb: t.thumb }, at: Date.now(),
+    };
+    this.items = [raw, ...this.items.filter((x) => `${x.owner_id}_${x.id}` !== t.key)].slice(0, 500);
+    try { localStorage.setItem('history', JSON.stringify(this.items)); } catch { /* не страшно */ }
+  },
+  clear() { this.items = []; try { localStorage.removeItem('history'); } catch { /* не страшно */ } },
+};
+
+function dayLabel(ts) {
+  const d = new Date(ts), today = new Date();
+  const days = Math.round((new Date(today.toDateString()) - new Date(d.toDateString())) / 86400e3);
+  if (days === 0) return 'Сегодня';
+  if (days === 1) return 'Вчера';
+  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+}
+
+async function viewHistory() {
+  if (!listenHistory.items.length) {
+    return [pageHead('Медиатека', 'История'), el('div', { class: 'state' }, el('div', { class: 'state-title', text: 'Здесь пока пусто' }), 'Треки, которые вы слушаете, появятся тут.')];
+  }
+  const tracks = listenHistory.items.map((x) => normTrack(x));
+  const out = [pageHead('Медиатека', 'История', tracksWord(tracks.length), [
+    ...playButtons(() => tracks),
+    el('button', { class: 'btn ghost', onclick: () => { listenHistory.clear(); router.go('history'); } }, 'Очистить'),
+  ])];
+  let label = null, group = null;
+  listenHistory.items.forEach((x, i) => {
+    const l = dayLabel(x.at);
+    if (l !== label) {
+      label = l;
+      group = el('div', { class: 'track-list' });
+      out.push(el('section', { class: 'section' }, el('div', { class: 'section-head' }, el('h2', { class: 'section-title', text: l })), group));
+    }
+    group.append(trackRow(tracks[i], tracks, i, { number: false }));
+  });
+  return out;
+}
+
 audio.addEventListener('playing', () => {
+  listenHistory.add(player.current);
   player.skips = 0;
   prepareNext();
 });
@@ -1598,21 +1713,21 @@ const MOOD_ICONS = {
 
 // Варианты берём у ВК (audio.getStreamMixSettings), а если он их не отдал — те же, что в приложении ВК.
 const MIX_DEFAULT_GROUPS = [
-  { id: 'mood', title: 'Настроение', big: true, options: [
-    { id: 'joyful', title: 'Радостно', svg: MOOD_ICONS.joyful },
+  { id: 'vibes', title: 'Настроение', big: true, options: [
+    { id: 'happy', title: 'Радостно', svg: MOOD_ICONS.joyful },
     { id: 'sad', title: 'Грустно', svg: MOOD_ICONS.sad },
     { id: 'active', title: 'Активно', svg: MOOD_ICONS.active },
     { id: 'calm', title: 'Спокойно', svg: MOOD_ICONS.calm },
     { id: 'love', title: 'Любовь', svg: MOOD_ICONS.love },
   ] },
-  { id: 'popularity', title: 'Узнаваемость', options: [
-    { id: 'familiar', title: 'Знакомое', local: 'familiar' },
-    { id: 'unfamiliar', title: 'Незнакомое', local: 'unfamiliar' },
-    { id: 'new', title: 'Новинки' },
+  { id: 'recognitions', title: 'Узнаваемость', options: [
+    { id: 'known', title: 'Знакомое', local: 'familiar' },
+    { id: 'unknown', title: 'Незнакомое', local: 'unfamiliar' },
+    { id: 'fresh', title: 'Новинки' },
   ] },
-  { id: 'language', title: 'Язык', options: [
-    { id: 'russian', title: 'Русский', local: 'ru' },
-    { id: 'foreign', title: 'Иностранный', local: 'foreign' },
+  { id: 'langs', title: 'Язык', options: [
+    { id: 'ru', title: 'Русский', local: 'ru' },
+    { id: 'international', title: 'Иностранный', local: 'foreign' },
     { id: 'instrumental', title: 'Без слов' },
   ] },
 ];
@@ -1635,17 +1750,66 @@ const mixSettings = {
     return picked.length ? picked.join(' · ') : 'Бесконечный поток музыки под ваш вкус';
   },
 
+  // Как передавать настройки в audio.getStreamMixAudios, ВК не документирует —
+  // способ подбирается один раз проверкой (discover) и запоминается
+  format: localStorage.getItem('mixFormat') || '',
+  FORMATS: {
+    keys: (sel) => Object.fromEntries(Object.entries(sel).map(([g, v]) => [g, v.join(',')])),
+    mix_params: (sel) => ({ mix_params: JSON.stringify(sel) }),
+    settings: (sel) => ({ settings: JSON.stringify(sel) }),
+    mix_settings: (sel) => ({ mix_settings: JSON.stringify(sel) }),
+    filters: (sel) => ({ filters: JSON.stringify(sel) }),
+    options: (sel) => ({ options: Object.values(sel).flat().join(',') }),
+    mix_options: (sel) => ({ mix_options: Object.values(sel).flat().join(',') }),
+    selected_options: (sel) => ({ selected_options: Object.values(sel).flat().join(',') }),
+  },
+  selection(chosen = this.chosen) {
+    return Object.fromEntries(Object.entries(chosen).filter(([, v]) => v).map(([g, v]) => [g, [v]]));
+  },
+
   // Параметры запроса микса
   params() {
     const params = { mix_id: 'common' };
-    for (const [groupId, optionId] of Object.entries(this.chosen)) {
-      const o = optionId && this.option(groupId, optionId);
-      if (!o) continue;
-      if (o.mixId) params.mix_id = o.mixId;
-      if (o.params) Object.assign(params, o.params);
-      else params[groupId] = o.id;
-    }
+    const fmt = this.FORMATS[this.format];
+    if (fmt && this.active()) Object.assign(params, fmt(this.selection()));
     return params;
+  },
+
+  // Проверка способов: отправляем микс с «Язык: Иностранный» и смотрим, запомнил ли ВК выбор
+  // (audio.getStreamMixSettings отдаёт отмеченные варианты) или поменялся ли язык треков
+  async discover() {
+    if (this.format || !auth.loggedIn) return this.format;
+    const cyrShare = (list) => list.length ? list.filter((t) => /[а-яё]/i.test(`${t.artist} ${t.title}`)).length / list.length : 0;
+    const fetchMix = async (extra) => {
+      const resp = await vk('audio.getStreamMixAudios', { mix_id: 'common', count: 20, append: 0, ...extra }, { cache: false });
+      return (Array.isArray(resp) ? resp : resp.items || []).map(normTrack);
+    };
+    const selectedNow = async () => {
+      const r = await vk('audio.getStreamMixSettings', { mix_id: 'common' }, { cache: false });
+      const out = {};
+      for (const g of ((r.settings || r).mix_categories || [])) for (const o of g.options || []) if (o.selected) out[g.id] = String(o.id);
+      return out;
+    };
+    const results = {};
+    for (const [name, fmt] of Object.entries(this.FORMATS)) {
+      try {
+        const foreign = await fetchMix(fmt({ langs: ['international'] }));
+        const stored = await selectedNow().catch(() => ({}));
+        const russian = await fetchMix(fmt({ langs: ['ru'] }));
+        const diff = cyrShare(russian) - cyrShare(foreign);
+        results[name] = { stored: stored.langs || '', diff: Math.round(diff * 100) / 100 };
+        if (stored.langs === 'international' || diff > 0.5) {
+          this.format = name;
+          break;
+        }
+      } catch (err) {
+        results[name] = err.message;
+      }
+    }
+    diag.add('mix', `подбор способа передать настройки: ${this.format || 'ни один не сработал'}`, results);
+    try { localStorage.setItem('mixFormat', this.format || 'none'); } catch { /* не страшно */ }
+    if (!this.format) this.format = 'none';
+    return this.format;
   },
 
   // Проверка трека по тому, что видно без ВК
@@ -1673,13 +1837,17 @@ const mixSettings = {
     try {
       const resp = await vk('audio.getStreamMixSettings', {}, { cache: false });
       diag.add('mix', 'audio.getStreamMixSettings', resp);
-      const rawGroups = Array.isArray(resp) ? resp : resp.items || resp.settings || resp.groups || resp.blocks || resp.filters || [];
+      // формат ВК: { settings: { mix_categories: [{ id: 'vibes', options: [{ id: 'happy', selected }] }] } }
+      const root = resp.settings || resp;
+      const rawGroups = root.mix_categories || root.categories || (Array.isArray(resp) ? resp : resp.items || []);
+      this.serverSelected = {};
+      for (const g of rawGroups) for (const o of g.options || []) if (o.selected) this.serverSelected[g.id] = String(o.id);
       const groups = rawGroups.map((g) => {
         const options = (g.options || g.items || g.values || g.buttons || []).map((o) => ({
           id: String(o.id ?? o.value ?? o.key ?? o.name ?? ''),
           title: o.title || o.name || o.text || '',
           svg: '',
-          image: (o.icon && (o.icon.url || (Array.isArray(o.icon) && o.icon.length && o.icon[o.icon.length - 1].url))) || (o.image && o.image.url) || '',
+          image: (typeof o.icon === 'string' && /\.(png|jpe?g|webp|svg)(\?|$)/i.test(o.icon) && o.icon) || (o.icon && (o.icon.url || (Array.isArray(o.icon) && o.icon.length && o.icon[o.icon.length - 1].url))) || (o.image && o.image.url) || '',
           mixId: o.mix_id || '',
           params: o.params || o.request_params || null,
         })).filter((o) => o.id && o.title);
@@ -1698,6 +1866,8 @@ const mixSettings = {
       this.groups = groups;
       this.fromVk = true;
       for (const k of Object.keys(this.chosen)) if (!this.option(k, this.chosen[k])) delete this.chosen[k];
+      // настройки, выбранные в приложении ВК, подхватываем, если здесь ещё ничего не выбрано
+      if (!this.active() && Object.keys(this.serverSelected).length) this.chosen = { ...this.serverSelected };
     } catch (err) {
       diag.add('mix', `audio.getStreamMixSettings: ${err.message}`); // остаются варианты по умолчанию
     }
@@ -1740,8 +1910,12 @@ const mixSettings = {
 
   close() { const p = $('#mix-settings'); if (p) p.remove(); },
 
-  apply() {
+  async apply() {
     this.chosen = this.clean(this.draft);
+    if (!this.format && this.active()) {
+      toast('Настраиваем VK Микс…', { duration: 20000 });
+      await this.discover();
+    }
     try { localStorage.setItem('mixSettings', JSON.stringify(this.chosen)); } catch { /* не страшно */ }
     this.close();
     const sub = $('#mix-sub');
@@ -2387,6 +2561,7 @@ const NOT_ORIGINAL = [
   'концерт', 'acoustic', 'акустика', 'edit', 'mashup', 'мэшап', 'bass boost', 'bass boosted', '8d', 'phonk',
   'demo', 'демо', 'radio', 'tiktok', 'tik tok', 'extended', 'перепев', 'пародия', 'parody', 'mix', 'vip',
   'bootleg', 'flip', 'rework', 'snippet', 'сниппет', 'нарезка', 'clean', 'censored', 'цензура', 'cut', 'short',
+  'без мата', 'без матов', 'без мата', 'no mat', 'нет мата', 'чистая версия', 'радио версия', 'type beat', 'beat', 'бит',
 ];
 const notOriginalRe = new RegExp(`(?<![\\p{L}\\p{N}])(${NOT_ORIGINAL.map((w) => w.replace(/ /g, '\\s*')).join('|')})(?![\\p{L}\\p{N}])`, 'iu');
 const EVIDENCE_RE = /(?<![\p{L}\p{N}])(uncensored|explicit|без цензуры|нецензур|18\+|original|оригинал|album version)(?![\p{L}\p{N}])/iu;
@@ -2418,10 +2593,10 @@ const uncensor = {
   // при смене способа проверки старые вердикты сбрасываются, ручной выбор пользователя остаётся
   memo: (() => {
     try {
-      const saved = localStorage.getItem('uncensorMemo4');
+      const saved = localStorage.getItem('uncensorMemo5');
       if (saved) return JSON.parse(saved);
-      const old = JSON.parse(localStorage.getItem('uncensorMemo3') || '{}');
-      ['uncensorMemo2', 'uncensorMemo3'].forEach((k) => localStorage.removeItem(k));
+      const old = JSON.parse(localStorage.getItem('uncensorMemo4') || '{}');
+      ['uncensorMemo2', 'uncensorMemo3', 'uncensorMemo4'].forEach((k) => localStorage.removeItem(k));
       return Object.fromEntries(Object.entries(old).filter(([, v]) => v && v.manual));
     } catch { return {}; }
   })(),
@@ -2443,7 +2618,7 @@ const uncensor = {
     this.memo[key] = { ...(value || { none: Date.now() }), alts: keep };
     const keys = Object.keys(this.memo);
     if (keys.length > 1500) keys.slice(0, keys.length - 1500).forEach((k) => delete this.memo[k]);
-    try { localStorage.setItem('uncensorMemo4', JSON.stringify(this.memo)); } catch { /* не страшно */ }
+    try { localStorage.setItem('uncensorMemo5', JSON.stringify(this.memo)); } catch { /* не страшно */ }
   },
 
   // нужно ли вообще проверять этот трек
@@ -2494,7 +2669,9 @@ const uncensor = {
     // приоритет: загрузки пользователей, пометки «без цензуры», та же длительность
     const score = (c) => (c.owner_id > 0 ? 3 : 0) + (EVIDENCE_RE.test(`${c.title} ${c.subtitle}`) ? 2 : 0)
       + (normText(c.title) !== normText(track.title) ? 1 : 0)
-      - Math.min(Math.abs(c.duration - track.duration), 30) * 0.15;
+      // оригиналы без цензуры часто на секунду-другую отличаются по длительности (другой мастер)
+      + (Math.abs(c.duration - track.duration) >= 1 && Math.abs(c.duration - track.duration) <= 6 ? 1.5 : 0)
+      - Math.min(Math.abs(c.duration - track.duration), 30) * 0.1;
     const reasons = {};
     const ok = [];
     const pool = [];
@@ -2596,6 +2773,7 @@ const uncensor = {
           row.corr = Math.round(res.corr * 100) / 100;
           row.spots = res.spots;
           row.shift = Math.round(res.lag * 10) / 10;
+          if (res.speed) row.speed = Math.round((res.speed - 1) * 1000) / 10;
           row.verdict = { uncensored: 'без цензуры ✓', same: 'та же цензура', different: 'другая запись' }[res.verdict];
           return res.verdict === 'uncensored';
         } catch (err) {
@@ -2607,9 +2785,9 @@ const uncensor = {
           renderUncensorStatus();
         }
       };
-      // по два кандидата параллельно, по порядку приоритета
-      for (let i = 0; i < list.length; i += 2) {
-        const batch = list.slice(i, i + 2);
+      // по три кандидата параллельно, по порядку приоритета
+      for (let i = 0; i < list.length; i += 3) {
+        const batch = list.slice(i, i + 3);
         const results = await Promise.all(batch.map(check));
         const hit = batch.find((_, j) => results[j]);
         if (hit) return finish('found', { key: hit.key, fullId: hit.fullId, title: hit.title, artist: hit.artist }, `Найдена версия без цензуры: ${hit.artist} — ${hit.title}`);
