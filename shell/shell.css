@@ -803,3 +803,47 @@ body:not(.is-playing) .fullscreen .fs-cover { transform: perspective(900px) scal
 
 .section-head .shuffle-all { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; margin-right: 6px; }
 .section-head .shuffle-all svg { width: 15px; height: 15px; }
+
+/* --- Полноэкранный: жидкий фон --- */
+.fs-liquid { position: absolute; inset: -10%; width: 120%; height: 120%; filter: blur(48px) saturate(1.25); opacity: .95; }
+.fs-bg:has(.fs-liquid) .fs-bg-layer { display: none; }
+.fs-bg-shade { z-index: 1; }
+
+/* --- Полноэкранный: интерфейс прячется без движения мыши --- */
+.fs-top, .fs-actions, .fs-controls, .fs-volume, .fs-progress .time, .fs-panel .qcards-hint, body.fs-open .window-buttons, .fs-info .uc-status { transition: opacity .6s ease; }
+body.fs-idle .fs-top, body.fs-idle .fs-actions, body.fs-idle .fs-controls, body.fs-idle .fs-volume,
+body.fs-idle .fs-progress .time, body.fs-idle .window-buttons, body.fs-idle .fs-info .uc-status { opacity: 0; pointer-events: none; }
+body.fs-idle .fullscreen, body.fs-idle .fullscreen * { cursor: none !important; }
+body.fs-idle .fs-progress .seek { opacity: .55; }
+
+/* --- Полноэкранный: жесты на обложке --- */
+.fs-cover { position: relative; touch-action: none; }
+.fs-cover.seeking img { transform: translateX(var(--seek-x, 0)); transition: none; }
+.fs-cover img { transition: transform .35s var(--spring); }
+.fs-gesture {
+  position: absolute; left: 50%; bottom: 16px; transform: translate(-50%, 6px); padding: 8px 14px; border-radius: 14px;
+  background: rgba(10,10,16,.72); backdrop-filter: blur(12px); color: #fff; font-weight: 700; font-size: 14px; white-space: nowrap;
+  font-variant-numeric: tabular-nums; opacity: 0; pointer-events: none; transition: opacity .2s, transform .25s var(--spring);
+}
+.fs-gesture.show { opacity: 1; transform: translate(-50%, 0); }
+.fs-heart { position: absolute; left: 50%; top: 50%; width: 120px; height: 120px; margin: -60px 0 0 -60px; color: #ff3b6b; pointer-events: none; filter: drop-shadow(0 10px 30px rgba(255,59,107,.6)); animation: heart-pop 1s var(--spring) forwards; }
+.fs-heart svg { width: 100%; height: 100%; }
+@keyframes heart-pop { 0% { transform: scale(.2); opacity: 0; } 25% { transform: scale(1.15); opacity: 1; } 45% { transform: scale(.95); } 70% { opacity: 1; } 100% { transform: scale(1.1) translateY(-30px); opacity: 0; } }
+
+/* --- Полноэкранный: «Далее» карточками --- */
+.qcards-hint { color: var(--faint); font-size: 12.5px; font-weight: 600; margin: 0 4px 12px; }
+.qcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 14px; padding: 0 4px; }
+.qcard { cursor: pointer; border-radius: 16px; padding: 8px; transition: background .15s, transform .2s var(--spring), opacity .15s; }
+.qcard:hover { background: rgba(255,255,255,.07); }
+.qcard.dragging { opacity: .35; }
+.qcard.over { background: rgba(255,255,255,.12); transform: scale(1.03); }
+.qcard.next { grid-column: span 2; grid-row: span 2; }
+.qcard-cover { position: relative; aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: rgba(255,255,255,.08); box-shadow: 0 12px 30px rgba(0,0,0,.35); }
+.qcard-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.qcard-badge { position: absolute; left: 10px; top: 10px; padding: 4px 10px; border-radius: 10px; background: rgba(255,255,255,.92); color: #111; font-size: 12px; font-weight: 750; }
+.qcard-num { position: absolute; left: 8px; top: 8px; min-width: 24px; height: 24px; padding: 0 6px; border-radius: 12px; display: grid; place-items: center; background: rgba(10,10,16,.6); backdrop-filter: blur(8px); font-size: 12px; font-weight: 700; }
+.qcard-text { padding: 8px 2px 0; min-width: 0; }
+.qcard-title { font-weight: 650; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qcard.next .qcard-title { font-size: 16px; }
+.qcard-artist { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+@media (prefers-reduced-motion: reduce) { .fs-heart { animation-duration: .01s; } }

@@ -149,6 +149,7 @@ function normTrack(a) {
     duration: a.duration || 0,
     url: a.url || '',
     explicit: Boolean(a.is_explicit),
+    mainColor: a.main_color || '',
     chart: a.audio_chart_info ? { position: a.audio_chart_info.position || 0, state: String(a.audio_chart_info.state || a.audio_chart_info.trend || '') } : null,
     thumb,
     cover: (size) => pickPhoto(thumb, size),
@@ -1706,18 +1707,50 @@ function renderNowPlaying() {
   renderQueue();
   updateMediaSession(true);
   renderProgress();
+  if (sheet.open && typeof liquid !== 'undefined') liquid.trackChanged();
 }
 
+// «Далее» карточками: обложки следующих треков; клик — включить, перетаскивание — поменять порядок
 function renderQueue() {
   const list = $('#fs-queue');
   const upcoming = [];
-  for (let i = player.pos + 1; i < player.order.length && upcoming.length < 30; i++) upcoming.push(i);
-  list.replaceChildren(...upcoming.map((p) => {
+  for (let i = player.pos + 1; i < player.order.length && upcoming.length < 40; i++) upcoming.push(i);
+  if (!upcoming.length) {
+    list.replaceChildren(el('div', { class: 'lyric-empty', text: 'Дальше ничего нет' }));
+    return;
+  }
+  let dragFrom = -1;
+  const card = (p, n) => {
     const t = player.queue[player.order[p]];
-    const row = trackRow(t, player.queue, player.order[p]);
-    row.onclick = () => player.jumpTo(p);
-    return row;
-  }));
+    const node = el('div', {
+      class: 'qcard' + (n === 0 ? ' next' : ''), draggable: 'true', dataset: { pos: String(p) },
+      title: `${t.artist} — ${t.title}`,
+      onclick: () => player.jumpTo(p),
+      ondragstart: (e) => { dragFrom = p; node.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; },
+      ondragend: () => { node.classList.remove('dragging'); $$('.qcard.over').forEach((x) => x.classList.remove('over')); },
+      ondragover: (e) => { e.preventDefault(); node.classList.add('over'); },
+      ondragleave: () => node.classList.remove('over'),
+      ondrop: (e) => {
+        e.preventDefault();
+        if (dragFrom < 0 || dragFrom === p) return;
+        const [moved] = player.order.splice(dragFrom, 1);
+        player.order.splice(p, 0, moved);
+        dragFrom = -1;
+        renderQueue();
+        prepareNext();
+      },
+    },
+    el('div', { class: 'qcard-cover' },
+      el('img', { src: t.cover(n === 0 ? 300 : 135) || null, alt: '', loading: 'lazy', draggable: 'false' }),
+      n === 0 ? el('span', { class: 'qcard-badge', text: 'Следующий' }) : el('span', { class: 'qcard-num', text: String(n + 1) })),
+    el('div', { class: 'qcard-text' },
+      el('div', { class: 'qcard-title', text: t.title }),
+      el('div', { class: 'qcard-artist', text: t.artist })));
+    return node;
+  };
+  list.replaceChildren(
+    el('div', { class: 'qcards-hint', text: 'Перетащите карточку, чтобы поменять порядок' }),
+    el('div', { class: 'qcards' }, upcoming.map(card)));
 }
 
 // --- Настройки VK Микса: настроение, узнаваемость, язык -------------------------------------
@@ -2246,6 +2279,7 @@ const sheet = {
     fs.hidden = false;
     this.open = true;
     document.body.classList.add('fs-open');
+    setTimeout(() => { liquid.key = null; liquid.trackChanged(); idle.wake(); }, 0);
     fsModes.set(fsModes.current);
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.set(0); this.cover(true); return; }
     // появляется оттуда, где была нижняя панель
@@ -2303,7 +2337,8 @@ const sheet = {
     if (projected > window.innerHeight * 0.3 && v > -200) sheet.hide(v);
     else sheet.springTo(0, { velocity: v, damping: 0.85, response: 0.36 }, () => sheet.cover(true));
   };
-  for (const target of [$('#fs-grabber'), $('#fs-cover'), $('.fs-top')]) {
+  window.sheetDrag = { onDown, onMove, onUp };
+  for (const target of [$('#fs-grabber'), $('.fs-top')]) {
     target.addEventListener('pointerdown', onDown);
     target.addEventListener('pointermove', onMove);
     target.addEventListener('pointerup', onUp);
@@ -3044,6 +3079,199 @@ function setImmersive(on) {
   bridge.window(on ? 'fullscreen' : 'exit-fullscreen');
 }
 $('#fs-immersive').addEventListener('click', () => setImmersive(!document.body.classList.contains('immersive')));
+
+// --- Полноэкранный: жидкий фон из цветов обложки -----------------------------------------
+// Цветные пятна медленно перетекают; на сильных долях (пульс от анализатора) вспыхивают.
+// Рисуем в маленький холст и растягиваем с размытием — почти бесплатно для видеокарты.
+const liquid = {
+  canvas: null, ctx: null, colors: ['#5b4bff', '#ff4b8b', '#2bd1c7', '#ffb347'], raf: 0, t: 0, key: null,
+  init() {
+    this.canvas = el('canvas', { class: 'fs-liquid', width: '96', height: '60' });
+    $('#fs-bg').prepend(this.canvas);
+    this.ctx = this.canvas.getContext('2d');
+  },
+  // палитра: 4 самых сочных и непохожих цвета обложки
+  async palette(track) {
+    const fallback = () => {
+      const c = track.mainColor && /^#?[0-9a-f]{6}$/i.test(track.mainColor.replace('#', '')) ? track.mainColor : '#5b4bff';
+      return [c, shade(c, 40), shade(c, -30), shade(c, 80)];
+    };
+    const url = track.cover(135);
+    if (!url) return fallback();
+    try {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.src = url;
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = c.height = 24;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0, 24, 24);
+      const d = g.getImageData(0, 0, 24, 24).data;
+      const px = [];
+      for (let i = 0; i < d.length; i += 4) {
+        const [r, gg, b] = [d[i], d[i + 1], d[i + 2]];
+        const max = Math.max(r, gg, b), min = Math.min(r, gg, b);
+        px.push({ r, g: gg, b, sat: max ? (max - min) / max : 0, lum: (max + min) / 510 });
+      }
+      px.sort((x, y) => (y.sat * (1 - Math.abs(y.lum - 0.5))) - (x.sat * (1 - Math.abs(x.lum - 0.5))));
+      // слишком тёмные и слишком светлые пиксели — только если других нет
+      const mid = px.filter((p) => p.lum > 0.14 && p.lum < 0.86);
+      const pool = mid.length >= 24 ? mid : px;
+      const picked = [];
+      for (const p of pool) {
+        if (picked.every((q) => Math.abs(q.r - p.r) + Math.abs(q.g - p.g) + Math.abs(q.b - p.b) > 90)) picked.push(p);
+        if (picked.length === 4) break;
+      }
+      while (picked.length < 4) picked.push(pool[picked.length * 37 % pool.length]);
+      // чуть светлее и сочнее, чтобы пятна светились даже у тёмных обложек
+      const lift = (v) => Math.min(255, Math.round(v * 1.35 + 18));
+      return picked.map((p) => `rgb(${lift(p.r)},${lift(p.g)},${lift(p.b)})`);
+    } catch {
+      return fallback();
+    }
+  },
+  async trackChanged() {
+    const t = player.current;
+    if (!t || t.key === this.key) return;
+    this.key = t.key;
+    this.colors = await this.palette(t);
+    this.start();
+  },
+  start() {
+    if (this.raf || !sheet.open) return;
+    if (!this.canvas) this.init();
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let last = performance.now();
+    const frame = (now) => {
+      this.raf = 0;
+      if (!sheet.open || document.body.classList.contains('paused')) return;
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      this.t += dt * (audio.paused ? 0.15 : 1);
+      this.draw(reduce ? 0 : pulse.level || 0);
+      if (!reduce) this.raf = requestAnimationFrame(frame);
+    };
+    this.raf = requestAnimationFrame(frame);
+  },
+  draw(beat) {
+    const { ctx } = this;
+    const W = 96, H = 60, t = this.t;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#0b0b12';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'screen';
+    const blobs = [[0.13, 0.17, 0], [0.09, 0.11, 1.7], [0.07, 0.15, 3.1], [0.11, 0.08, 4.4], [0.05, 0.12, 5.6]];
+    blobs.forEach(([fx, fy, ph], i) => {
+      const x = W * (0.5 + 0.38 * Math.sin(t * fx + ph));
+      const y = H * (0.5 + 0.36 * Math.cos(t * fy + ph * 1.3));
+      const r = H * (0.55 + 0.12 * Math.sin(t * 0.21 + i)) * (1 + beat * 0.35);
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      const c = this.colors[i % this.colors.length];
+      g.addColorStop(0, c);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.globalAlpha = 0.75 + beat * 0.25;
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    });
+    ctx.globalAlpha = 1;
+  },
+};
+function shade(hex, amt) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  const f = (v) => Math.max(0, Math.min(255, v + amt));
+  return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
+}
+
+// --- Полноэкранный: интерфейс прячется, если мышь не двигается 5 секунд ---------------------
+const idle = {
+  timer: 0,
+  wake() {
+    document.body.classList.remove('fs-idle');
+    clearTimeout(this.timer);
+    if (!sheet.open) return;
+    this.timer = setTimeout(() => {
+      const busy = !$('#eq-panel').hidden || $('#uc-details') || $('#mix-settings') || openMenuEl || audio.paused;
+      if (sheet.open && !busy) document.body.classList.add('fs-idle');
+      else this.wake();
+    }, 5000);
+  },
+};
+['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach((ev) => document.addEventListener(ev, () => idle.wake(), { passive: true }));
+audio.addEventListener('pause', () => idle.wake());
+audio.addEventListener('play', () => liquid.start());
+bridge.onWindowVisible((visible) => { if (visible) liquid.start(); });
+audio.addEventListener('play', () => idle.wake());
+
+// --- Полноэкранный: жесты на обложке ------------------------------------------------------
+// колесо — громкость, тянуть влево/вправо — перемотка, вниз — свернуть, двойной клик — в «Мои аудио»
+(function coverGestures() {
+  const cover = $('#fs-cover');
+  const bubble = el('div', { class: 'fs-gesture' });
+  cover.append(bubble);
+  let bubbleTimer = 0;
+  const say = (text) => {
+    bubble.textContent = text;
+    bubble.classList.add('show');
+    clearTimeout(bubbleTimer);
+    bubbleTimer = setTimeout(() => bubble.classList.remove('show'), 900);
+  };
+
+  cover.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    setVolume(audio.volume + (e.deltaY < 0 ? 0.05 : -0.05));
+    say(`Громкость ${Math.round(audio.volume * 100)}%`);
+  }, { passive: false });
+
+  let start = null, mode = '', preview = 0;
+  cover.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    start = { x: e.clientX, y: e.clientY, time: audio.currentTime, e };
+    mode = '';
+    cover.setPointerCapture(e.pointerId);
+  });
+  cover.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (!mode) {
+      if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) mode = 'seek';
+      else if (Math.abs(dy) > 8) { mode = 'sheet'; window.sheetDrag.onDown(Object.assign(start.e, { currentTarget: cover })); }
+    }
+    if (mode === 'seek') {
+      // вся ширина обложки — минута
+      const dur = audio.duration || player.current?.duration || 0;
+      preview = Math.max(0, Math.min(dur - 1, start.time + (dx / cover.clientWidth) * 60));
+      const delta = Math.round(preview - start.time);
+      say(`${fmt(preview)}  ${delta >= 0 ? '+' : '−'}${Math.abs(delta)} с`);
+      cover.classList.add('seeking');
+      cover.style.setProperty('--seek-x', `${Math.max(-1, Math.min(1, dx / cover.clientWidth)) * 18}px`);
+    } else if (mode === 'sheet') {
+      window.sheetDrag.onMove(e);
+    }
+  });
+  const end = () => {
+    if (!start) return;
+    if (mode === 'seek') { audio.currentTime = preview; renderProgress(); }
+    if (mode === 'sheet') window.sheetDrag.onUp();
+    cover.classList.remove('seeking');
+    cover.style.removeProperty('--seek-x');
+    start = null;
+    mode = '';
+  };
+  cover.addEventListener('pointerup', end);
+  cover.addEventListener('pointercancel', end);
+
+  cover.addEventListener('dblclick', async () => {
+    const t = player.current;
+    if (!t) return;
+    const heart = el('div', { class: 'fs-heart', html: '<svg viewBox="0 0 24 24"><path class="fill" d="M12 21s-8-5.1-8-11.2A4.6 4.6 0 0 1 12 7a4.6 4.6 0 0 1 8 2.8C20 15.9 12 21 12 21z"/></svg>' });
+    cover.append(heart);
+    setTimeout(() => heart.remove(), 1000);
+    if (!auth.loggedIn) { openLogin(); return; }
+    if (library.has(t)) toast('Уже в Моих аудио');
+    else await library.toggle(t);
+  });
+})();
 
 // --- Клавиатура ----------------------------------------------------------------------------
 
