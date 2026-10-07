@@ -474,6 +474,7 @@ function playlistCard(p) {
 function sectionHead(title, action) {
   return el('div', { class: 'section-head' },
     el('h2', { class: 'section-title', text: title || '' }),
+    auth.loggedIn && /^мои треки$/i.test(title || '') ? el('button', { class: 'more shuffle-all', title: 'Перемешать все мои треки', onclick: () => playAllMy(true) }, iconEl('shuffle'), 'Перемешать всё') : null,
     action ? el('button', { class: 'more', text: 'Все', onclick: () => router.go('section', { id: action.section_id, title, url: action.action && action.action.url }) }) : null);
 }
 
@@ -700,6 +701,14 @@ async function chartFromAccount() {
       if (p) { const found = await fromPlaylist(p, `сообщества ${owner}`); if (found) return found; }
     } catch (err) { diag.add('chart', `плейлисты ${owner}: ${err.message}`); }
   }
+  // «Сегодня в плеере» из Обзора аккаунта — то, что сейчас больше всего слушают
+  try {
+    const today = await accountExploreBlock('player_today');
+    if (today && today.blocks.some((b) => b.kind === 'tracks')) {
+      diag.add('chart', 'взят блок «Сегодня в плеере»', firstTracks(today));
+      return { ...today, popular: true };
+    }
+  } catch (err) { diag.add('chart', `сегодня в плеере: ${err.message}`); }
   // популярное во ВКонтакте — то, что сейчас слушают больше всего
   try {
     const resp = await vk('audio.getPopular', { count: 100, only_eng: 0 });
@@ -767,9 +776,9 @@ async function viewChart() {
   }
   const block = data.blocks.find((b) => b.kind === 'tracks');
   const tracks = block.tracks;
-  tracks.forEach((t, i) => { if (!t.chart) t.chart = { position: i + 1, state: '' }; });
+  if (!data.popular) tracks.forEach((t, i) => { if (!t.chart) t.chart = { position: i + 1, state: '' }; });
   return [
-    pageHead(data.popular ? 'Популярное во ВКонтакте' : 'Открыть новое', data.popular ? 'Популярное сейчас' : 'Чарт VK Музыки', tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
+    pageHead(data.popular ? 'Популярное во ВКонтакте' : 'Открыть новое', data.popular ? 'Сегодня в плеере' : 'Чарт VK Музыки', tracksWord(tracks.length) + (block.nextFrom ? '+' : ''), playButtons(() => tracks)),
     pagedTrackList(tracks, data.id, block.nextFrom || data.nextFrom),
   ];
 }
@@ -818,6 +827,48 @@ async function viewSection({ id, title, url }) {
 }
 
 const MY_PAGE = 200;
+// Все «Мои аудио» целиком — для «Слушать» и «Перемешать» (ВК отдаёт по 200, при частых
+// запросах отвечает ошибкой — тогда ждём и повторяем, а не останавливаемся на первой сотне)
+let myAllCache = null;
+async function loadAllMy(onProgress = () => {}) {
+  const uid = auth.me && auth.me.id;
+  if (myAllCache && myAllCache.uid === uid && Date.now() - myAllCache.at < 5 * 60e3) return myAllCache.tracks;
+  const tracks = [];
+  const seen = new Set();
+  let total = Infinity;
+  for (let offset = 0, guard = 0; offset < total && guard < 100; guard++) {
+    let resp = null;
+    for (let attempt = 0; attempt < 4 && !resp; attempt++) {
+      try {
+        resp = await vk('audio.get', { owner_id: uid, count: MY_PAGE, offset }, { cache: false });
+      } catch (err) {
+        diag.add('my', `audio.get offset ${offset}: ${err.message}`);
+        await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+      }
+    }
+    if (!resp) break;
+    total = resp.count || 0;
+    const page = (resp.items || []).map(normTrack);
+    if (!page.length) break;
+    page.forEach((t) => { if (!seen.has(t.key)) { seen.add(t.key); tracks.push(t); } });
+    offset += page.length;
+    onProgress(tracks.length, total);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  diag.add('my', `загружено ${tracks.length} из ${total}`);
+  myAllCache = { uid, at: Date.now(), tracks };
+  return tracks;
+}
+
+async function playAllMy(shuffle) {
+  if (!auth.loggedIn) { openLogin(); return; }
+  toast('Загружаем все треки…', { duration: 60000 });
+  const tracks = await loadAllMy((n, total) => toast(`Загружаем треки: ${n} из ${total}`, { duration: 60000 }));
+  if (!tracks.length) { toast('Не удалось загрузить треки'); return; }
+  toast(shuffle ? `Перемешано ${tracksWord(tracks.length)}` : `В очереди ${tracksWord(tracks.length)}`);
+  player.playList(tracks, 0, { shuffle });
+}
+
 async function viewMy() {
   if (!auth.loggedIn) return loginPrompt('Моя музыка');
   const uid = auth.me && auth.me.id;
@@ -844,9 +895,11 @@ async function viewMy() {
     }
   };
   if (offset < total) loadMore = more;
-  // «Слушать всё» — сначала догружаем весь список
-  const all = async () => { while (offset < total) { const before = offset; await more(); if (offset === before) break; } return tracks; };
-  return [pageHead('Медиатека', 'Моя музыка', tracksWord(total), playButtons(all)), list];
+  // «Слушать» и «Перемешать» — по всему списку, а не только по загруженной части
+  return [pageHead('Медиатека', 'Моя музыка', tracksWord(total), [
+    el('button', { class: 'btn primary', onclick: () => playAllMy(false) }, iconEl('play'), 'Слушать'),
+    el('button', { class: 'btn ghost', onclick: () => playAllMy(true) }, iconEl('shuffle'), 'Перемешать всё'),
+  ]), list];
 }
 
 async function viewRecs() {
@@ -1255,8 +1308,15 @@ const player = {
     if (known) {
       const altUrl = await uncensor.urlOf(known);
       if (id !== this.loadId) return;
-      if (altUrl) { track.substitute = { ...known, url: altUrl }; playUrl = altUrl; }
-      if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
+      if (altUrl) {
+        track.substitute = { ...known, url: altUrl };
+        playUrl = altUrl;
+        if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
+      } else if (!known.manual) {
+        // запомненная копия больше недоступна — ищем заново, пока играет лицензия
+        delete uncensor.memo[track.key];
+        uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id));
+      }
     } else if (uncensor.applies(track) && uncensor.get(track.key) === null) {
       if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
     } else if (uncensor.applies(track)) {
@@ -2333,7 +2393,7 @@ const uncensor = {
   get(key) {
     const v = this.memo[key];
     if (!v) return undefined;
-    if (v.none) return v.manual || Date.now() - v.none < 3 * 86400e3 ? null : undefined;
+    if (v.none) return v.manual || Date.now() - v.none < 86400e3 ? null : undefined;
     return v;
   },
 
@@ -2411,14 +2471,22 @@ const uncensor = {
     return ok.sort((a, b) => score(b) - score(a)).slice(0, 14);
   },
 
+  // ссылка на звук версии: по ID, а если ВК не отдал (чужие загрузки) — находим её поиском заново
   async urlOf(t) {
     if (t.url) return t.url;
     try {
       const [fresh] = await vk('audio.getById', { audios: t.fullId }, { cache: false });
-      return (fresh && fresh.url) || '';
-    } catch {
-      return '';
+      if (fresh && fresh.url) return fresh.url;
+    } catch { /* поищем */ }
+    for (const q of [`${t.artist} ${t.title}`, t.title]) {
+      try {
+        const resp = await vk('audio.search', { q, count: 100, auto_complete: 0 }, { cache: false });
+        const hit = (resp.items || []).find((a) => `${a.owner_id}_${a.id}` === t.key && a.url);
+        if (hit) return hit.url; // в запомненную версию ссылку не пишем — она живёт недолго
+      } catch { /* следующий запрос */ }
     }
+    diag.add('18+', `нет ссылки на версию ${t.artist} — ${t.title}`);
+    return '';
   },
 
   // звук трека: скачиваем, декодируем в моно 8 кГц (для сравнения волн этого достаточно)
