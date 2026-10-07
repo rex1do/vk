@@ -581,8 +581,21 @@ function mixCard() {
   return card;
 }
 
+let mixLogged = false;
 async function viewHome() {
-  const data = parseCatalog(await vk('catalog.getAudio', { url: 'https://vk.ru/audio', need_blocks: 1 }));
+  const resp = await vk('catalog.getAudio', { url: 'https://vk.ru/audio', need_blocks: 1 });
+  const data = parseCatalog(resp);
+  // для отчёта: как ВК описывает интерактивный VK Микс (настроение, язык и т.п.)
+  if (auth.loggedIn && !mixLogged) {
+    mixLogged = true;
+    try {
+      const sec = ((resp.catalog && resp.catalog.sections) || [])[0] || {};
+      const mixBlock = (sec.blocks || []).find((b) => /stream_mix/.test(`${b.data_type} ${(b.layout && b.layout.name) || ''}`));
+      const extra = Object.fromEntries(Object.entries(resp).filter(([k]) => /mix|stream|filter|setting/i.test(k)));
+      diag.add('mix', `блок микса на Главной: ${JSON.stringify({ block: mixBlock, data: extra }).slice(0, 12000)}`);
+    } catch (err) { diag.add('mix', `блок микса: ${err.message}`); }
+    mixSettings.loadFromVk();
+  }
   return [
     pageHead('Обзор', auth.me ? `Привет, ${auth.me.first_name}` : 'Музыка для вас', null),
     mixCard(),
@@ -635,6 +648,11 @@ async function viewPublicList(url, eyebrow, title) {
 // Чарт VK Музыки. Гостевой каталог ВК отдаёт устаревший чарт, поэтому ищем блок чарта
 // в каталоге аккаунта: блок с раскладкой music_chart_* и его «Показать все».
 async function chartFromAccount() {
+  // мобильный «Обзор»: «Собрано редакцией» → «Чарт VK Музыки» — он во второй части раздела
+  try {
+    const found = await accountExploreBlock('chart', /^чарт\s+vk/i);
+    if (found && found.blocks.some((b) => b.kind === 'tracks')) return found;
+  } catch (err) { diag.add('chart', `обзор: ${err.message}`); }
   const isChart = (b) => b.data_type === 'music_audios'
     && (/chart/.test((b.layout && b.layout.name) || '') || /chart/.test(b.url || '') || /чарт/i.test(b.title || (b.layout && b.layout.title) || ''));
   const describe = (resp) => ((resp.catalog && resp.catalog.sections) || (resp.section ? [resp.section] : [])).map((sec) => ({
@@ -729,28 +747,46 @@ async function chartFromAccount() {
   return null;
 }
 
-// Блок раздела «Обзор» аккаунта по имени (block=new_songs и т.п.), открытый целиком
-async function accountExploreBlock(name) {
-  const resp = await vk('catalog.getAudio', { url: 'https://vk.ru/audio?section=explore', need_blocks: 1 });
-  const sections = (resp.catalog && resp.catalog.sections) || [];
-  for (const sec of sections) {
-    let blocks = sec.blocks || [];
-    if (!blocks.length && /обзор/i.test(sec.title || '')) {
-      try { blocks = ((await vk('catalog.getSection', { section_id: sec.id })).section || {}).blocks || []; } catch { blocks = []; }
-    }
-    const i = blocks.findIndex((b) => new RegExp(`[?&]block=${name}(&|$)`).test(b.url || ''));
-    if (i < 0) continue;
-    const block = blocks[i];
-    let id = block.meta && block.meta.show_all_info && block.meta.show_all_info.section_id;
-    for (let j = i - 1; !id && j >= 0 && j >= i - 2; j--) {
-      const action = (blocks[j].actions || []).find((a) => a.section_id);
-      if (action) id = action.section_id;
-    }
-    diag.add('catalog', `блок ${name} в «${sec.title}»: ${id ? 'раздел целиком' : 'только блок'}`);
-    if (id) return parseCatalog(await vk('catalog.getSection', { section_id: id }));
-    return parseCatalog(resp, { ...sec, blocks: [block] });
+// Блок раздела «Обзор» аккаунта (block=new_songs, чарт и т.п.), открытый целиком.
+// ВК отдаёт «Обзор» частями (как при прокрутке) — листаем, пока не найдём.
+async function accountExploreBlock(name, headerRe = null) {
+  const first = await vk('catalog.getAudio', { url: 'https://vk.ru/audio?section=explore', need_blocks: 1 });
+  const sections = (first.catalog && first.catalog.sections) || [];
+  const sec = sections.find((x) => /обзор/i.test(x.title || '') || /section=explore/.test(x.url || '')) || sections[0];
+  if (!sec) return null;
+  let page = { resp: first, section: sec };
+  if (!(sec.blocks || []).length) {
+    const r = await vk('catalog.getSection', { section_id: sec.id });
+    page = { resp: r, section: r.section || { blocks: [] } };
   }
-  diag.add('catalog', `блок ${name} в «Обзоре» не найден`);
+  const titles = [];
+  for (let n = 0; n < 10 && page; n++) {
+    const blocks = page.section.blocks || [];
+    let header = null;
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      const layout = (b.layout && b.layout.name) || '';
+      if (layout.startsWith('header')) { header = b; titles.push((b.layout && b.layout.title) || b.title || ''); continue; }
+      if (layout === 'separator') continue;
+      const headerTitle = header ? (header.layout && header.layout.title) || header.title || '' : '';
+      const byUrl = new RegExp(`[?&]block=${name}(&|$)`).test(b.url || '');
+      const byTitle = headerRe && headerRe.test(headerTitle) && b.data_type === 'music_audios';
+      if (byUrl || byTitle) {
+        let id = b.meta && b.meta.show_all_info && b.meta.show_all_info.section_id;
+        const action = header && (header.actions || []).find((x) => x.section_id);
+        if (!id && action) id = action.section_id;
+        diag.add('catalog', `«${headerTitle || name}» найден в «Обзоре» (часть ${n + 1}): ${id ? 'раздел целиком' : 'только блок'}`);
+        if (id) return parseCatalog(await vk('catalog.getSection', { section_id: id }));
+        return parseCatalog(page.resp, { ...page.section, blocks: [header, b].filter(Boolean) });
+      }
+      header = null;
+    }
+    const next = page.section.next_from;
+    if (!next) break;
+    const r = await vk('catalog.getSection', { section_id: page.section.id || sec.id, start_from: next });
+    page = { resp: r, section: r.section || { blocks: [] } };
+  }
+  diag.add('catalog', `«${name}» в «Обзоре» не найден; заголовки: ${titles.join(' | ')}`);
   return null;
 }
 
@@ -1205,8 +1241,11 @@ const player = {
 
   async fetchMix(append) {
     const get = async (more) => {
-      const resp = await vk('audio.getStreamMixAudios', { ...mixSettings.params(), count: 10, append: more ? 1 : 0 }, { cache: false });
-      return (Array.isArray(resp) ? resp : resp.items || []).map(normTrack);
+      const params = { ...mixSettings.params(), count: 10, append: more ? 1 : 0 };
+      const resp = await vk('audio.getStreamMixAudios', params, { cache: false });
+      const list = (Array.isArray(resp) ? resp : resp.items || []).map(normTrack);
+      diag.add('mix', `getStreamMixAudios ${JSON.stringify(params)}`, list.slice(0, 4).map((t) => `${t.artist} — ${t.title}`));
+      return list;
     };
     try {
       let tracks = await get(append);
