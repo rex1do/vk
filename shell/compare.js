@@ -234,7 +234,7 @@ function compareOnce(licensedRaw, otherRaw, { maxShiftSec = 12 } = {}) {
   }
   close();
   const spotShare = counted ? spotWindows / counted : 0;
-  if (spots >= 1 && level < 0.92) return { verdict: 'different', corr: share, spots, lag: lagSec, level };
+  if (spots >= 1 && level < 0.95) return { verdict: 'different', corr: share, spots, lag: lagSec, level };
   const verdict = spots >= 1 && spotShare < 0.35 ? 'uncensored' : 'same';
   return { verdict, corr: share, spots, lag: lagSec, level };
 }

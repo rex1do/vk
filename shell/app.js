@@ -137,7 +137,8 @@ function normTrack(a) {
     id: a.id,
     owner_id: a.owner_id,
     access_key: a.access_key || '',
-    isLicensed: Boolean(a.is_licensed) || a.owner_id < 0,
+    // лицензионный трек: так отмечен, принадлежит площадке или привязан к релизу/карточке артиста
+    isLicensed: Boolean(a.is_licensed) || a.owner_id < 0 || Boolean(a.album && a.album.id) || Boolean((a.main_artists || []).length),
     album: (a.album && a.album.title) || '',
     key: `${a.owner_id}_${a.id}`,
     fullId: `${a.owner_id}_${a.id}${a.access_key ? '_' + a.access_key : ''}`,
@@ -381,12 +382,12 @@ function rowNumber(track, index) {
     trend ? el('i', { class: 'trend ' + trend, title: { crown: 'Лидер чарта', up: 'Поднялся', down: 'Опустился', new: 'Новинка в чарте', same: 'Без изменений' }[trend] }) : null);
 }
 
-function trackRow(track, list, index, { number = false } = {}) {
+function trackRow(track, list, index, { number = false, onPlay = null } = {}) {
   const row = el('div', {
     class: 'row' + (player.current && player.current.key === track.key ? ' playing' : ''),
     dataset: { key: track.key },
     title: `${track.artist} — ${track.title}`,
-    onclick: () => player.playList(list, index),
+    onclick: () => { player.playList(list, index); if (onPlay && player.queue === list) onPlay(list); },
   },
   number ? rowNumber(track, index) : null,
   el('div', { class: 'row-cover' },
@@ -464,8 +465,38 @@ function artistChip(a) {
     el('div', { class: 'artist-chip-name', text: a.name }));
 }
 
-function trackGrid(tracks) {
-  return el('div', { class: 'track-grid' }, tracks.map((t, i) => trackRow(t, tracks, i)));
+// Сетка показывает первые 12 треков, но играет весь блок; onPlay догружает остальное
+function trackGrid(tracks, { limit = 12, onPlay = null } = {}) {
+  return el('div', { class: 'track-grid' }, tracks.slice(0, limit).map((t, i) => trackRow(t, tracks, i, { onPlay })));
+}
+
+// Дописать треки в играющую очередь (без повторов); mixed — вразброс после текущего
+function appendToQueue(queue, more, mixed = false) {
+  if (player.queue !== queue) return;
+  const have = new Set(queue.map((t) => t.key));
+  for (const t of more) {
+    if (have.has(t.key)) continue;
+    have.add(t.key);
+    queue.push(t);
+    const idx = queue.length - 1;
+    if (mixed) player.order.splice(player.pos + 1 + Math.floor(Math.random() * (player.order.length - player.pos)), 0, idx);
+    else player.order.push(idx);
+  }
+  renderQueue();
+}
+
+// Что догружать, когда трек запущен из блока на главной: «Мои треки» — вся медиатека,
+// другие блоки с «Все» — весь раздел
+function blockExtender(block) {
+  if (/^мои треки$/i.test(block.title || '') && auth.loggedIn) {
+    return (queue) => loadAllMy().then((all) => appendToQueue(queue, all, player.shuffle)).catch(() => {});
+  }
+  if (block.action && block.action.section_id) {
+    return (queue) => loadSection({ id: block.action.section_id, url: block.action.action && block.action.action.url })
+      .then((data) => appendToQueue(queue, data.blocks.filter((b) => b.kind === 'tracks').flatMap((b) => b.tracks), player.shuffle))
+      .catch(() => {});
+  }
+  return null;
 }
 function trackList(tracks, { number = true } = {}) {
   return el('div', { class: 'track-list' }, tracks.map((t, i) => trackRow(t, tracks, i, { number })));
@@ -513,7 +544,7 @@ function renderBlocks(blocks, { limit = 99 } = {}) {
     if (block.kind === 'tracks') {
       const list = block.layout === 'list' || block.layout === 'music_chart_list'
         ? trackList(block.tracks)
-        : trackGrid(block.tracks.slice(0, 12));
+        : trackGrid(block.tracks, { onPlay: blockExtender(block) });
       frag.append(el('section', { class: 'section' }, sectionHead(block.title, block.action), list));
     } else if (block.kind === 'playlists') {
       frag.append(el('section', { class: 'section' }, sectionHead(block.title, block.action),
@@ -955,20 +986,7 @@ async function playAllMy(shuffle) {
 // остальные треки медиатеки догружаются в фоне и добавляются в очередь (вразброс, если перемешано)
 async function appendRestMy(queue, mixed) {
   const all = await loadAllMy().catch(() => []);
-  if (player.queue !== queue) return; // пользователь уже включил другое
-  const have = new Set(queue.map((t) => t.key));
-  const rest = all.filter((t) => !have.has(t.key));
-  for (const t of rest) {
-    queue.push(t);
-    const idx = queue.length - 1;
-    if (mixed) {
-      const at = player.pos + 1 + Math.floor(Math.random() * (player.order.length - player.pos));
-      player.order.splice(at, 0, idx);
-    } else {
-      player.order.push(idx);
-    }
-  }
-  renderQueue();
+  appendToQueue(queue, all, mixed);
 }
 
 async function viewMy() {
@@ -1427,6 +1445,8 @@ const player = {
       if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
     } else if (uncensor.applies(track)) {
       uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id));
+    } else if (uncensor.enabled && auth.loggedIn) {
+      diag.add('18+', `${track.artist} — ${track.title}: автопоиск пропущен (${!track.isLicensed ? 'не лицензия' : track.duration <= 30 ? 'короткий' : 'нет условия'})`);
     }
     renderUncensorStatus();
     renderSubstitute();
