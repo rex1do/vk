@@ -2783,7 +2783,12 @@ const uncensor = {
   memo: (() => {
     try {
       const saved = localStorage.getItem('uncensorMemo5');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        // «нет копий» без единой найденной копии могли записаться, когда ВК требовал капчу — проверим заново
+        const memo = JSON.parse(saved);
+        for (const [k, v] of Object.entries(memo)) if (v && v.none && !v.manual && !(v.alts || []).length) delete memo[k];
+        return memo;
+      }
       const old = JSON.parse(localStorage.getItem('uncensorMemo4') || '{}');
       ['uncensorMemo2', 'uncensorMemo3', 'uncensorMemo4'].forEach((k) => localStorage.removeItem(k));
       return Object.fromEntries(Object.entries(old).filter(([, v]) => v && v.manual));
