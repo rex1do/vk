@@ -1478,7 +1478,12 @@ const player = {
     const fadeSec = this.pendingFade;
     this.pendingFade = 0;
     if (fadeSec > 0) this.swapDeck(fadeSec);
-    else { const d = deck(); clearInterval(d.fadeTimer); d.fadeTimer = 0; d.pausing = false; d.fade = 1; applyVolume(d); }
+    else {
+      // ручное переключение: прошлый трек замолкает сразу, даже если новый ещё грузится
+      const d = deck();
+      clearInterval(d.fadeTimer); d.fadeTimer = 0; d.pausing = false; d.fade = 1; applyVolume(d);
+      if (this.current && this.current !== track && !d.paused) d.pause();
+    }
     this.current = track;
     renderNowPlaying();
     this.markRows();
@@ -1497,9 +1502,13 @@ const player = {
     let playUrl = track.url;
     const known = uncensor.applies(track) ? uncensor.get(track.key) : undefined;
     if (known) {
-      const altUrl = await uncensor.urlOf(known);
+      // ссылку на запомненную версию ждём недолго; если долго — играем лицензию и переключимся позже
+      const urlJob = uncensor.urlOf(known);
+      const altUrl = await Promise.race([urlJob, new Promise((r) => setTimeout(() => r(null), 2500))]);
       if (id !== this.loadId) return;
-      if (altUrl) {
+      if (altUrl === null) {
+        urlJob.then((u) => { if (u) this.useSubstitute(track, { ...known, url: u }, id); });
+      } else if (altUrl) {
         track.substitute = { ...known, url: altUrl };
         playUrl = altUrl;
         if (!uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
@@ -1771,6 +1780,7 @@ async function prepareNext() {
     const current = player.current && uncensor.jobs.get(player.current.key);
     Promise.resolve(current).catch(() => null).then(() => uncensor.analyze(next));
   }
+  preloadCover(next);
   if (!next || next.url || preparedKey === next.key) return;
   preparedKey = next.key;
   try {
@@ -1813,6 +1823,18 @@ function setAmbient(url) {
   img.src = url;
 }
 
+const loadedCovers = new Set();
+// заранее загружаем обложку (и раскодируем), чтобы смена трека была мгновенной
+function preloadCover(t) {
+  if (!t) return;
+  for (const url of [t.cover(135), t.cover(1200) || t.cover(600)]) {
+    if (!url || loadedCovers.has(url)) continue;
+    const img = new Image();
+    img.src = url;
+    img.decode().then(() => loadedCovers.add(url)).catch(() => {});
+  }
+}
+
 function renderNowPlaying() {
   const t = player.current;
   $('#player').classList.toggle('idle', !t);
@@ -1823,8 +1845,20 @@ function renderNowPlaying() {
   const big = t ? t.cover(1200) || t.cover(600) : '';
   const barImg = $('#bar-cover img');
   if (small) barImg.src = small; else barImg.removeAttribute('src');
+  // большая обложка: сразу маленькая (она уже в кэше), чёткая — когда загрузится и раскодируется
   const fsImg = $('#fs-cover img');
-  if (big) fsImg.src = big; else fsImg.removeAttribute('src');
+  const coverKey = t ? t.key : '';
+  fsImg.dataset.key = coverKey;
+  if (!big) fsImg.removeAttribute('src');
+  else if (fsImg.src !== big) {
+    if (small && !loadedCovers.has(big)) fsImg.src = small;
+    const hi = new Image();
+    hi.src = big;
+    hi.decode().catch(() => {}).then(() => {
+      loadedCovers.add(big);
+      if (fsImg.dataset.key === coverKey) fsImg.src = big;
+    });
+  }
   $('#fs-title').textContent = t ? t.title : '';
   artistLine(t, '', $('#fs-artist'));
   lyrics.trackChanged();
@@ -1843,7 +1877,11 @@ function renderNowPlaying() {
 }
 
 // «Далее» карточками: обложки следующих треков; клик — включить, перетаскивание — поменять порядок
+let queueDirty = false;
 function renderQueue() {
+  // карточки строим, только когда вкладка «Далее» открыта — иначе при каждой смене трека это лишняя работа
+  if (!sheet.open || fsModes.current !== 'queue') { queueDirty = true; return; }
+  queueDirty = false;
   const list = $('#fs-queue');
   const upcoming = [];
   for (let i = player.pos + 1; i < player.order.length && upcoming.length < 40; i++) upcoming.push(i);
@@ -2412,7 +2450,7 @@ const sheet = {
     fs.hidden = false;
     this.open = true;
     document.body.classList.add('fs-open');
-    setTimeout(() => { liquid.key = null; liquid.trackChanged(); idle.wake(); }, 0);
+    setTimeout(() => { liquid.key = null; liquid.trackChanged(); idle.wake(); if (queueDirty) renderQueue(); }, 0);
     fsModes.set(fsModes.current);
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) { this.set(0); this.cover(true); return; }
     // появляется оттуда, где была нижняя панель
@@ -2530,10 +2568,13 @@ content.addEventListener('scroll', closeMenu, { passive: true });
 
 const library = {
   keys: new Set(),
+  ids: new Map(), // как трек записан в «Моих аудио»
+  copies: (() => { try { return JSON.parse(localStorage.getItem('addedCopies') || '{}'); } catch { return {}; } })(), // номер копии из audio.add
   loaded: false,
 
   async load() {
     this.keys.clear();
+    this.ids.clear();
     libraryArtists.clear();
     this.loaded = false;
     if (!auth.loggedIn || !auth.me) return renderAddState();
@@ -2545,6 +2586,7 @@ const library = {
         const items = resp.items || [];
         items.forEach((a) => {
           this.keys.add(`${a.owner_id}_${a.id}`);
+          this.ids.set(`${a.owner_id}_${a.id}`, { owner_id: a.owner_id, id: a.id });
           (a.main_artists || []).forEach((x) => x.name && libraryArtists.add(x.name.toLowerCase()));
           if (a.artist) libraryArtists.add(a.artist.toLowerCase());
         });
@@ -2566,17 +2608,43 @@ const library = {
     if (!auth.loggedIn) { openLogin(); return; }
     try {
       if (this.has(t)) {
-        try {
-          await vk('audio.delete', { audio_id: t.id, owner_id: auth.me.id }, { cache: false });
-        } catch {
-          await vk('audio.delete', { audio_id: t.id, owner_id: t.owner_id }, { cache: false });
+        // ВК хранит трек в списке по-разному: пробуем по очереди, пока один способ не сработает
+        const me = auth.me.id;
+        const stored = this.ids.get(t.key);
+        const copy = this.copies[t.key];
+        const attempts = [
+          copy && ['audio.delete', { owner_id: me, audio_id: copy }],
+          stored && ['audio.delete', { owner_id: stored.owner_id, audio_id: stored.id }],
+          ['audio.delete', { owner_id: me, audio_id: t.id }],
+          ['audio.delete', { owner_id: t.owner_id, audio_id: t.id }],
+          ['audio.removeFromPlaylist', { owner_id: me, playlist_id: -1, audio_ids: t.fullId }],
+        ].filter(Boolean);
+        let done = false, lastErr = null;
+        for (const [method, params] of attempts) {
+          try {
+            const res = await vk(method, params, { cache: false });
+            diag.add('library', `${method} ${JSON.stringify(params)} → ${JSON.stringify(res)}`);
+            done = true;
+            break;
+          } catch (err) {
+            lastErr = err;
+            diag.add('library', `${method} ${JSON.stringify(params)}: ${err.message}`);
+          }
         }
+        if (!done) throw lastErr || new Error('ВК не дал удалить');
         this.keys.delete(t.key);
+        delete this.copies[t.key];
+        try { localStorage.setItem('addedCopies', JSON.stringify(this.copies)); } catch { /* не страшно */ }
         toast('Убрано из Моих аудио');
       } else {
         const params = { audio_id: t.id, owner_id: t.owner_id };
         if (t.access_key) params.access_key = t.access_key;
-        await vk('audio.add', params, { cache: false });
+        const newId = await vk('audio.add', params, { cache: false });
+        diag.add('library', `audio.add → ${JSON.stringify(newId)}`);
+        if (typeof newId === 'number') {
+          this.copies[t.key] = newId;
+          try { localStorage.setItem('addedCopies', JSON.stringify(this.copies)); } catch { /* не страшно */ }
+        }
         this.keys.add(t.key);
         toast('Добавлено в Мои аудио');
       }
