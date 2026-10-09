@@ -1,7 +1,7 @@
 {
   "name": "vk-player",
   "productName": "VK Player",
-  "version": "4.15.0",
+  "version": "4.15.1",
   "description": "Десктопный плеер ВК Музыки со своим интерфейсом в стиле liquid glass",
   "main": "main.js",
   "license": "MIT",

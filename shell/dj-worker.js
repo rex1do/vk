@@ -205,7 +205,7 @@ function loudness(x, rate) {
   let last = db.length - 1;
   while (last > 0 && db[last] <= floor) last--;
   const avg = db.length ? db.reduce((s, v) => s + v, 0) / db.length : -100;
-  return { firstLoud: Math.max(0, first) * 0.1, lastLoud: (last + 1) * 0.1, energy: avg, loud };
+  return { firstLoud: Math.max(0, first) * 0.1, lastLoud: (last + 1) * 0.1, energy: avg, loud, db: db.map((v) => Math.round(v * 10) / 10) };
 }
 
 self.onmessage = (e) => {
