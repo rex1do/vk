@@ -1829,6 +1829,47 @@ audio.addEventListener('timeupdate', () => player.maybeCrossfade());
 audio.addEventListener('playing', () => { if (player.crossLock && player.crossLock !== player.loadId) player.crossLock = 0; });
 audio.addEventListener('durationchange', renderProgress);
 
+// --- Сторож воспроизведения: трек «завис» без данных — переподключаемся с того же места ---------
+const stallGuard = { since: 0, at: 0, kicks: 0 };
+const bufferedAhead = () => {
+  const b = audio.buffered, t = audio.currentTime;
+  for (let i = 0; b && i < b.length; i++) if (b.start(i) <= t + 0.3 && b.end(i) >= t) return +(b.end(i) - t).toFixed(1);
+  return 0;
+};
+audio.addEventListener('waiting', () => {
+  if (!stallGuard.since) stallGuard.since = Date.now();
+  stallGuard.at = audio.currentTime;
+});
+audio.addEventListener('playing', () => {
+  if (stallGuard.since) {
+    const ms = Date.now() - stallGuard.since;
+    if (ms > 700) diag.add('сеть', `пауза ${(ms / 1000).toFixed(1)} с на ${stallGuard.at.toFixed(0)} с трека`);
+  }
+  stallGuard.since = 0;
+  stallGuard.kicks = 0;
+});
+audio.addEventListener('loadstart', () => { stallGuard.since = 0; });
+setInterval(() => {
+  const t = player.current;
+  if (!stallGuard.since || audio.paused || !t || Date.now() - stallGuard.since < 5000) return;
+  if (stallGuard.kicks >= 3) return;
+  stallGuard.kicks += 1;
+  stallGuard.since = Date.now();
+  const at = audio.currentTime;
+  diag.add('сеть', `нет данных 5 с на ${at.toFixed(0)} с (буфер ${bufferedAhead()} с) — переподключаемся`);
+  const id = player.loadId;
+  bridge.resetNetwork().catch(() => {}).then(() => {
+    if (id !== player.loadId || player.current !== t) return;
+    player.attach(t.substitute ? t.substitute.url : t.url, id, t, 1, at);
+  });
+}, 1000);
+// долгие подвисания интерфейса тоже пишем в отчёт: по ним видно, мешает ли что-то звуку
+try {
+  new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) if (e.duration > 400) diag.add('интерфейс', `подвисание ${Math.round(e.duration)} мс`);
+  }).observe({ type: 'longtask', buffered: false });
+} catch { /* не поддерживается */ }
+
 // --- Отображение «Сейчас играет» -----------------------------------------------------------
 
 let ambientUrl = '';
