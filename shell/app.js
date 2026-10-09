@@ -1622,7 +1622,7 @@ const player = {
     if (!dj.mixing) {
       deck().defaultPlaybackRate = 1;
       deck().playbackRate = 1;
-      eq.deckFx(deckIdx, { low: 0, hp: 10 });
+      eq.resetDeck(deckIdx);
     }
     if (/\.m3u8/.test(url) && window.Hls && Hls.isSupported()) {
       // сеть иногда моргает: кусочки потока перезапрашиваем терпеливо, а не сдаёмся сразу
@@ -2847,6 +2847,22 @@ bridge.onDownloadProgress(({ progress }) => {
 
 // --- Эквалайзер (Web Audio) ---------------------------------------------------------------
 
+// импульс для ревербератора: затухающий шум, высокие гаснут быстрее — мягкий «зал»
+function reverbImpulse(ctx, seconds) {
+  const len = Math.floor(ctx.sampleRate * seconds);
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    let lp = 0;
+    for (let i = 0; i < len; i++) {
+      const t = i / len;
+      lp += (Math.random() * 2 - 1 - lp) * (0.5 - 0.42 * t);
+      d[i] = lp * Math.pow(1 - t, 2.2) * 0.6;
+    }
+  }
+  return buf;
+}
+
 const eq = {
   freqs: [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000],
   presets: {
@@ -2884,19 +2900,40 @@ const eq = {
       this.analyser.fftSize = 512;
       this.analyser.smoothingTimeConstant = 0.6;
       // на каждой деке свои фильтры для DJ-переходов: срез баса и фильтр высоких частот
+      // У каждой деки свой «пульт» для DJ-переходов: подстройка громкости, трёхполосный эквалайзер,
+      // фильтр высоких частот с резонансом, фейдер; отправки на эхо (в такт) и на общий ревербератор
+      const master = this.filters[0];
+      this.reverb = ctx.createConvolver();
+      this.reverb.buffer = reverbImpulse(ctx, 2.6);
+      const reverbOut = ctx.createGain();
+      reverbOut.gain.value = 0.9;
+      this.reverb.connect(reverbOut).connect(master);
+      const make = (type, freq, q) => { const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; if (q) f.Q.value = q; return f; };
       this.fx = sources.map((src) => {
-        const low = ctx.createBiquadFilter();
-        low.type = 'lowshelf';
-        low.frequency.value = 200;
-        low.gain.value = 0;
-        const hp = ctx.createBiquadFilter();
-        hp.type = 'highpass';
-        hp.frequency.value = 10;
-        hp.Q.value = 0.7;
-        src.connect(low).connect(hp).connect(this.filters[0]);
-        return { low, hp };
+        const trim = ctx.createGain();
+        const low = make('lowshelf', 180);
+        const mid = make('peaking', 1000, 0.8);
+        const high = make('highshelf', 4500);
+        const hp = make('highpass', 10, 0.7);
+        const mix = ctx.createGain();
+        const echoIn = ctx.createGain(), delay = ctx.createDelay(3), fb = ctx.createGain(), wet = ctx.createGain();
+        const rvIn = ctx.createGain();
+        [echoIn, fb, wet, rvIn].forEach((g) => { g.gain.value = 0; });
+        src.connect(trim).connect(low).connect(mid).connect(high).connect(hp).connect(mix).connect(master);
+        hp.connect(echoIn).connect(delay);
+        delay.connect(fb).connect(delay);
+        delay.connect(wet).connect(master);
+        hp.connect(rvIn).connect(this.reverb);
+        return { trim, low, mid, high, hp, mix, echoIn, delay, fb, wet, rvIn };
       });
-      [...this.filters, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
+      // мягкий лимитер на выходе: два трека вместе не перегружают звук
+      this.limiter = ctx.createDynamicsCompressor();
+      this.limiter.threshold.value = -2;
+      this.limiter.knee.value = 2;
+      this.limiter.ratio.value = 20;
+      this.limiter.attack.value = 0.002;
+      this.limiter.release.value = 0.2;
+      [...this.filters, this.limiter, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
       this.ctx = ctx;
       this.apply();
     } catch (err) {

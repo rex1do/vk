@@ -922,3 +922,8 @@ body.fs-idle .fullscreen.mode-cover .fs-cover { max-height: min(60vh, 620px); }
 .tr-seg button.active { background: rgba(255,255,255,.9); color: #111; }
 .tr-note { color: var(--faint); font-size: 12px; padding: 0 0 4px; }
 .tr-note[hidden], .cf-row[hidden] { display: none; }
+
+/* идёт DJ-переход: плашка с полосой хода сведения */
+.fs-dj { position: relative; overflow: hidden; }
+.fs-dj.mixing { color: #fff; background: rgba(255,255,255,.14); }
+.fs-dj.mixing::after { content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: calc(var(--mix, 0) * 100%); background: linear-gradient(90deg, rgba(255,255,255,.4), #fff); transition: width .1s linear; }

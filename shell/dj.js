@@ -224,7 +224,7 @@ const dj = {
     if (!p || p.ready || p.simple) { if (p) p.fallback = true; this.releaseSpare(); return; }
     diag.add('dj', `простое сведение: ${why}`);
     const A = deck(), id = player.loadId;
-    Object.assign(p, { simple: true, beatmatched: false, r: 1, pA: 0.5, L: 16, startB: 0, entryB: 8, exitA: A.duration - 0.5, outro: false, drop: false });
+    Object.assign(p, { simple: true, style: 'simple', beatmatched: false, r: 1, pA: 0.5, L: 16, startB: 0, entryB: 8, exitA: A.duration - 0.5, outro: false, drop: false, trimDb: 0 });
     p.startA = Math.max(A.currentTime + 2, A.duration - 8.5);
     try {
       p.src = p.src || await this.sourceFor(p.next);
@@ -273,7 +273,7 @@ const dj = {
       await this.loadSpare(src.url, p.startB, p.r);
       if (this.plan !== p || id !== player.loadId) { this.releaseSpare(); return; }
       p.ready = true;
-      diag.add('dj', `${cur.title} → ${next.title}: ${ra.bpm ? ra.bpm.toFixed(1) : '?'} → ${rb.bpm ? rb.bpm.toFixed(1) : '?'} BPM, ${p.beatmatched ? `сведение ×${p.r.toFixed(3)}` : 'без подгонки темпа'}; наложение ${p.L} долей с ${p.startA.toFixed(1)} с (уходим на ${p.exitA.toFixed(1)} с из ${A.duration.toFixed(0)}${p.outro ? ', перед аутро' : ''}), новый с ${p.startB.toFixed(1)} с, вход на ${p.entryB.toFixed(1)} с${p.drop ? ' (после вступления)' : ''}`);
+      diag.add('dj', `${cur.title} → ${next.title}: ${ra.bpm ? ra.bpm.toFixed(1) : '?'} → ${rb.bpm ? rb.bpm.toFixed(1) : '?'} BPM, ${p.style === 'blend' ? `сведение ×${p.r.toFixed(3)}` : 'эхо-переход в долю'}, громкость ${p.trimDb > 0 ? '+' : ''}${p.trimDb.toFixed(1)} дБ; наложение ${p.L} долей с ${p.startA.toFixed(1)} с (уходим на ${p.exitA.toFixed(1)} с из ${A.duration.toFixed(0)}${p.outro ? ', перед аутро' : ''}), новый с ${p.startB.toFixed(1)} с, вход на ${p.entryB.toFixed(1)} с${p.drop ? ' (после вступления)' : ''}`);
     } catch (err) {
       if (this.plan === p) this.fail(err.message);
     }
@@ -332,26 +332,39 @@ const dj = {
         }
       }
     }
-    // --- длина наложения: сколько долей вступления B помещается (максимум 32, минимум 8)
-    let L = beatmatched ? (pA * 32 <= 20 ? 32 : 16) : 4;
-    const fitB = Math.floor(entryB / (pA * r) / 4) * 4; // долей A до входа B
-    L = Math.min(L, Math.max(4, fitB));
-    if (!beatmatched) L = Math.min(L, 8);
+    // --- сценарий и длина наложения
+    let style, L, startB;
+    if (beatmatched) {
+      // вступление B целиком под последними тактами A (до 32 долей); короткое вступление —
+      // B начинается с самого начала, а его «вход» придётся чуть позже
+      style = 'blend';
+      L = pA * 32 <= 20 ? 32 : 16;
+      const fitB = Math.floor(entryB / (pA * r) / 4) * 4;
+      if (fitB >= 8) { L = Math.min(L, fitB); startB = entryB - L * pA * r; } else { L = 16; startB = 0; }
+    } else {
+      // темпы не свести — 4 доли разгона фильтром и эхом, новый трек вступает сразу со своей сильной части
+      style = 'cut';
+      L = 4;
+      startB = Math.max(0, entryB - L * pA);
+    }
     const startA = exitA - L * pA;
-    const startB = Math.max(0, entryB - L * pA * r);
-    return { beatmatched, r, pA, L, startA, startB, exitA, entryB, endA, outro, drop };
+    // громкость: новый трек на входе звучит так же громко, как старый перед уходом
+    const pB = ok(rb) ? rb.period : 0.5;
+    const lvA = level(ra, exitA - tailStart - 8 * pA, exitA - tailStart), lvB = level(rb, entryB, entryB + 8 * pB);
+    const trimDb = lvA > -90 && lvB > -90 ? Math.max(-6, Math.min(4, lvA - lvB)) : 0;
+    return { style, beatmatched, r, pA, L, startA, startB: Math.max(0, startB), exitA, entryB, endA, outro, drop, trimDb };
   },
 
-  // готовим следующий трек на запасной деке: на нужной секунде, на паузе, с нужным темпом
+  // готовим следующий трек на запасной деке: на нужной секунде, на паузе, с нужным темпом, фейдер внизу
   loadSpare(url, at, rate) {
     const i = 1 - deckIdx;
     const d = decks[i];
     clearInterval(d.fadeTimer); d.fadeTimer = 0;
     d.pause();
     player.destroyHls(i);
-    d.fade = 0;
+    d.fade = 1;
     applyVolume(d);
-    eq.deckFx(i, { low: -26, hp: 10 });
+    eq.resetDeck(i, { mix: 0 });
     return new Promise((resolve, reject) => {
       const done = () => {
         d.defaultPlaybackRate = rate;
@@ -385,24 +398,95 @@ const dj = {
     d.load();
     d.defaultPlaybackRate = 1;
     d.playbackRate = 1;
-    eq.deckFx(i, { low: 0, hp: 10 });
+    eq.resetDeck(i);
   },
 
   start() {
     const p = this.plan;
     clearInterval(this.timer); this.timer = 0;
     const aIdx = deckIdx;
-    const B = decks[1 - aIdx];
+    const A = decks[aIdx], B = decks[1 - aIdx];
     this.mixing = true;
     p.aIdx = aIdx;
+    p.rateA = A.playbackRate || 1;
     B.play().catch(() => {});
+    // весь переход расписываем заранее по долям прямо в звуковом движке — точно в бит и без ступенек
+    if (eq.ctx && eq.fx) this.schedule(p, eq.ctx.currentTime + Math.max(0, p.startA - A.currentTime));
+    else p.noFx = true;
     // плеер переходит на следующий трек сразу: уже играющая запасная дека становится основной
     this.takeover = { track: p.next, deck: 1 - aIdx, substitute: p.src.substitute };
     player.pos = p.nextPos;
     player.load();
     p.lastFix = 0;
     p.err = 0;
+    document.body.classList.add('dj-mixing');
+    renderDj();
     this.timer = setInterval(() => this.mixTick(), 25);
+  },
+
+  // Сценарии переходов. T(b) — время доли b перехода (по сетке уходящего трека).
+  //  blend — темпы сведены: вступление нового трека входит «тонким» (без баса, фильтр открывается),
+  //          оба трека звучат вместе; на сильной доле бас переходит к новому, старый уходит
+  //          с резонансным фильтром, эхом в такт и хвостом ревербератора;
+  //  cut   — темпы не свести: старый трек разгоняется фильтром, последняя доля уходит в эхо,
+  //          и новый трек вступает точно в долю — сразу со своей сильной части;
+  //  simple — бит не определился: плавное сведение с фильтрами за ~8 секунд.
+  schedule(p, t0) {
+    const a = eq.fx[p.aIdx], b = eq.fx[1 - p.aIdx];
+    const pA = p.pA / (p.rateA || 1), T = (k) => t0 + k * pA; // доля в реальном времени
+    const set = (param, v, t) => param.setValueAtTime(v, t);
+    const lin = (param, v, t) => param.linearRampToValueAtTime(v, t);
+    const exp = (param, v, t) => param.exponentialRampToValueAtTime(Math.max(v, 0.0001), t);
+    const all = [a, b].flatMap((f) => [f.trim.gain, f.low.gain, f.mid.gain, f.high.gain, f.hp.frequency, f.hp.Q, f.mix.gain, f.echoIn.gain, f.fb.gain, f.wet.gain, f.rvIn.gain]);
+    all.forEach((param) => { param.cancelScheduledValues(t0 - 0.05); param.setValueAtTime(param.value, t0 - 0.01); });
+    // громкость нового трека подравниваем к старому, потом она плавно вернётся к своей
+    set(b.trim.gain, Math.pow(10, (p.trimDb || 0) / 20), t0);
+    a.delay.delayTime.setValueAtTime(Math.min(2.5, pA * 0.75), t0);
+    const L = p.L;
+    if (p.style === 'blend') {
+      // новый: вступление «тонкое» — без баса, фильтр открывается к середине
+      set(b.mix.gain, 0, t0); lin(b.mix.gain, 0.8, T(2)); lin(b.mix.gain, 1, T(L));
+      set(b.low.gain, -40, t0); set(b.low.gain, -40, T(L) - 0.05); lin(b.low.gain, 0, T(L));
+      set(b.mid.gain, -5, t0); lin(b.mid.gain, 0, T(L * 0.75));
+      set(b.hp.frequency, 450, t0); exp(b.hp.frequency, 20, T(L * 0.5));
+      // старый: середина уступает место, на сильной доле бас уходит, дальше фильтр, эхо и хвост
+      set(a.mid.gain, 0, T(L * 0.5)); lin(a.mid.gain, -6, T(L));
+      set(a.low.gain, 0, T(L) - 0.05); lin(a.low.gain, -40, T(L));
+      set(a.hp.frequency, 20, T(L * 0.75)); exp(a.hp.frequency, 160, T(L)); exp(a.hp.frequency, 2200, T(L + 4));
+      set(a.hp.Q, 0.7, T(L)); lin(a.hp.Q, 6, T(L + 3.5));
+      set(a.mix.gain, 1, T(L)); lin(a.mix.gain, 0, T(L + 4));
+      set(a.fb.gain, 0.45, T(L - 1));
+      set(a.echoIn.gain, 0, T(L - 1)); lin(a.echoIn.gain, 1, T(L - 0.5)); set(a.echoIn.gain, 1, T(L + 2)); lin(a.echoIn.gain, 0, T(L + 4));
+      set(a.wet.gain, 0, T(L - 1)); lin(a.wet.gain, 0.5, T(L)); lin(a.wet.gain, 0, T(L + 12));
+      set(a.rvIn.gain, 0, T(L)); lin(a.rvIn.gain, 0.55, T(L + 2)); lin(a.rvIn.gain, 0, T(L + 4.5));
+      lin(a.fb.gain, 0, T(L + 14));
+      p.endBeats = L + 4;
+    } else if (p.style === 'cut') {
+      // старый: 4 доли разгона резонансным фильтром, последняя доля уходит в эхо и ревербератор
+      set(a.hp.frequency, 20, t0); exp(a.hp.frequency, 900, T(L));
+      set(a.hp.Q, 0.7, t0); lin(a.hp.Q, 7, T(L));
+      set(a.fb.gain, 0.5, T(L - 1));
+      set(a.echoIn.gain, 0, T(L - 1)); lin(a.echoIn.gain, 1, T(L - 0.75)); set(a.echoIn.gain, 1, T(L)); lin(a.echoIn.gain, 0, T(L) + 0.03);
+      set(a.wet.gain, 0, T(L - 1)); lin(a.wet.gain, 0.65, T(L)); lin(a.wet.gain, 0, T(L + 10));
+      set(a.rvIn.gain, 0, T(L - 1)); lin(a.rvIn.gain, 0.7, T(L)); lin(a.rvIn.gain, 0, T(L) + 0.25);
+      set(a.mix.gain, 1, T(L)); lin(a.mix.gain, 0, T(L) + 0.03);
+      lin(a.fb.gain, 0, T(L + 12));
+      // новый: молчит до сильной доли, потом вступает сразу во всю силу, фильтр раскрывается за долю
+      set(b.mix.gain, 0, t0); set(b.mix.gain, 0, T(L)); lin(b.mix.gain, 1, T(L) + 0.02);
+      set(b.hp.frequency, 260, T(L)); exp(b.hp.frequency, 20, T(L + 1));
+      p.endBeats = L + 0.2;
+    } else {
+      const S = (sec) => t0 + sec;
+      set(b.mix.gain, 0, t0); lin(b.mix.gain, 1, S(4));
+      set(b.low.gain, -30, t0); set(b.low.gain, -30, S(4)); lin(b.low.gain, 0, S(4.3));
+      set(b.hp.frequency, 600, t0); exp(b.hp.frequency, 20, S(4));
+      set(a.low.gain, 0, S(4)); lin(a.low.gain, -30, S(4.3));
+      set(a.hp.frequency, 20, S(4)); exp(a.hp.frequency, 1600, S(8));
+      set(a.hp.Q, 0.7, S(4)); lin(a.hp.Q, 4, S(8));
+      set(a.mix.gain, 1, S(5)); lin(a.mix.gain, 0, S(8));
+      set(a.rvIn.gain, 0, S(5)); lin(a.rvIn.gain, 0.5, S(7)); lin(a.rvIn.gain, 0, S(8.2));
+      p.endBeats = 8 / pA;
+    }
   },
 
   mixTick() {
@@ -410,7 +494,7 @@ const dj = {
     if (!p) return;
     const A = decks[p.aIdx], B = decks[1 - p.aIdx];
     const el = A.currentTime - p.startA;
-    const k = el / (p.L * p.pA);
+    const k = el / ((p.endBeats || p.L) * p.pA);
     if (A.paused || A.ended || A.readyState < 3 || k >= 1) return this.finish();
     // держим доли вместе: сравниваем, где B есть и где должен быть, и чуть подгоняем скорость
     const now = performance.now();
@@ -421,41 +505,46 @@ const dj = {
       if (Math.abs(err) > 0.25) { this.selfSeek = true; B.currentTime = p.startB + p.r * el + 0.03; p.err = 0; }
       else B.playbackRate = Math.max(p.r * 0.95, Math.min(p.r * 1.05, p.r * (1 - p.err * 1.2)));
     }
-    // громкость: вступление B плавно поднимается под A (без баса), A держится и в последней
-    // четверти стихает; на входе B — на сильной доле — бас переходит к нему
-    const kin = Math.min(1, Math.max(0, k / 0.6));
-    const kout = Math.min(1, Math.max(0, (k - 0.6) / 0.4));
-    const soft = Math.min(1, el / (2 * p.pA)); // первые две доли — мягкий вход, без щелчка
-    B.fade = p.beatmatched ? soft * (0.35 + 0.65 * Math.sin(kin * Math.PI / 2)) : Math.sin(Math.min(1, k) * Math.PI / 2);
-    A.fade = Math.cos(kout * Math.PI / 2);
-    applyVolume(A); applyVolume(B);
-    if (k >= 0.5) eq.deckFx(p.aIdx, { hp: 20 * Math.pow(15, Math.min(1, (k - 0.5) / 0.5)) });
-    if (k >= 0.97 && !p.swapped) {
-      p.swapped = true;
-      eq.deckFx(1 - p.aIdx, { low: 0 }, 0.02);
-      eq.deckFx(p.aIdx, { low: -26 }, 0.02);
+    if (p.noFx) {
+      // без звукового движка — простое сведение громкостью
+      B.fade = Math.min(1, k * 2); A.fade = Math.max(0, 1 - Math.max(0, k - 0.5) * 2);
+      applyVolume(A); applyVolume(B);
     }
+    const bar = $('#fs-dj');
+    if (bar) bar.style.setProperty('--mix', Math.min(1, Math.max(0, k)).toFixed(3));
   },
 
   finish() {
     const p = this.plan;
     clearInterval(this.timer); this.timer = 0;
     if (!p) return;
-    const A = decks[p.aIdx], B = decks[1 - p.aIdx];
+    const aIdx = p.aIdx, bIdx = 1 - aIdx;
+    const A = decks[aIdx], B = decks[bIdx];
     A.pause();
-    player.destroyHls(p.aIdx);
+    player.destroyHls(aIdx);
     A.removeAttribute('src');
     A.load();
     A.defaultPlaybackRate = 1;
     A.playbackRate = 1;
     A.fade = 1;
-    eq.deckFx(p.aIdx, { low: 0, hp: 10 });
-    eq.deckFx(1 - p.aIdx, { low: 0, hp: 10 });
     B.fade = 1;
-    applyVolume(B);
+    applyVolume(A); applyVolume(B);
+    // у нового трека пульт возвращается в нейтраль; у старого эхо и ревербератор доигрывают хвост
+    eq.resetDeck(bIdx, { keepTrim: true });
+    const ctx = eq.ctx;
+    if (ctx && eq.fx) {
+      const tb = eq.fx[bIdx].trim.gain;
+      tb.cancelScheduledValues(ctx.currentTime);
+      tb.setValueAtTime(tb.value, ctx.currentTime);
+      tb.linearRampToValueAtTime(1, ctx.currentTime + 20);
+      const id = player.loadId;
+      setTimeout(() => { if (!this.mixing && !this.plan && id === player.loadId) eq.resetDeck(aIdx); }, 9000);
+    }
     this.mixing = false;
     this.plan = null;
-    // темп возвращается к родному плавно, за ~12 секунд — на слух незаметно
+    document.body.classList.remove('dj-mixing');
+    renderDj();
+    // темп возвращается к родному плавно, за ~20 секунд — на слух незаметно
     const id = player.loadId, from = B.playbackRate;
     clearInterval(this.ramp);
     if (Math.abs(from - 1) > 0.001) {
@@ -476,19 +565,28 @@ const dj = {
   // ручное вмешательство (другой трек, перемотка, пауза): переход сворачивается сразу
   abort() {
     clearInterval(this.timer); this.timer = 0;
-    if (this.mixing) { this.finish(); return; }
+    if (this.mixing) {
+      const p = this.plan;
+      this.finish();
+      if (p) { eq.resetDeck(p.aIdx); eq.resetDeck(1 - p.aIdx); }
+      return;
+    }
     clearInterval(this.ramp);
     if (this.plan) { this.plan = null; this.releaseSpare(); }
   },
 };
 
-// цепочка эквалайзера с отдельными фильтрами на каждую деку
-eq.deckFx = function deckFx(i, { low, hp }, tau = 0) {
-  const fx = this.fx && this.fx[i];
-  if (!fx) return;
+// пульт деки в нейтраль: всё как без DJ-режима (отменяет и расписанные изменения)
+eq.resetDeck = function resetDeck(i, { mix = 1, keepTrim = false } = {}) {
+  const f = this.fx && this.fx[i];
+  if (!f) return;
   const t = this.ctx.currentTime;
-  if (low !== undefined) { if (tau) fx.low.gain.setTargetAtTime(low, t, tau); else { fx.low.gain.cancelScheduledValues(t); fx.low.gain.value = low; } }
-  if (hp !== undefined) { fx.hp.frequency.cancelScheduledValues(t); fx.hp.frequency.value = hp; }
+  const put = (param, v) => { param.cancelScheduledValues(t); param.setValueAtTime(v, t); };
+  if (!keepTrim) put(f.trim.gain, 1);
+  put(f.low.gain, 0); put(f.mid.gain, 0); put(f.high.gain, 0);
+  put(f.hp.frequency, 10); put(f.hp.Q, 0.7);
+  put(f.mix.gain, mix);
+  put(f.echoIn.gain, 0); put(f.fb.gain, 0); put(f.wet.gain, 0); put(f.rvIn.gain, 0);
 };
 
 // --- Интерфейс ------------------------------------------------------------------------------------
@@ -497,8 +595,11 @@ function renderDj() {
   if (!badge) return;
   const t = player.current;
   const info = dj.enabled && t ? dj.data[t.key] : null;
-  badge.hidden = !info || !info.bpm;
-  if (info && info.bpm) badge.textContent = `DJ · ${Math.round(info.bpm * (t && deck().playbackRate || 1))} BPM · ${info.camelot}`;
+  const mixing = dj.mixing && dj.plan;
+  badge.hidden = !mixing && (!info || !info.bpm);
+  badge.classList.toggle('mixing', Boolean(mixing));
+  if (mixing) badge.textContent = dj.plan.style === 'blend' ? 'Сведение в такт' : 'Эхо-переход';
+  else if (info && info.bpm) badge.textContent = `DJ · ${Math.round(info.bpm * (t && deck().playbackRate || 1))} BPM · ${info.camelot}`;
 }
 
 audio.addEventListener('timeupdate', () => dj.tick());
