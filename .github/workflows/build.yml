@@ -24,6 +24,15 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
+      - name: Create release
+        # electron-builder заливает установщик и переносную версию одновременно, и каждая загрузка
+        # пыталась создать релиз сама — вторая падала. Создаём релиз заранее, загрузки только дополняют его.
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release view "v$VERSION" >/dev/null 2>&1 || gh release create "v$VERSION" --title "$VERSION" --target "$GITHUB_SHA" --notes "VK Player $VERSION"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish release
         # каждая сборка из main публикуется как релиз vX.Y.Z — программа при запуске проверяет его
         # и обновляется сама (latest.yml + установщик); версию в package.json поднимаем при каждом выпуске
