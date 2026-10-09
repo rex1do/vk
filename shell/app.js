@@ -1544,14 +1544,20 @@ const player = {
     if (!altUrl || id !== this.loadId) return;
     track.substitute = { ...alt, url: altUrl };
     renderSubstitute();
-    this.attach(altUrl, id, track, false, audio.currentTime);
+    this.attach(altUrl, id, track, 0, audio.currentTime);
     toast(alt.manual ? 'Включена выбранная версия' : 'Включена версия без цензуры');
   },
 
-  attach(url, id, track, retried = false, startAt = 0) {
+  attach(url, id, track, retries = 0, startAt = 0) {
     const wasPaused = audio.paused && startAt > 0;
     this.destroyHls();
     if (/\.m3u8/.test(url) && window.Hls && Hls.isSupported()) {
+      // сеть иногда моргает: кусочки потока перезапрашиваем терпеливо, а не сдаёмся сразу
+      const policy = (ttfb, load, tries) => ({ default: {
+        maxTimeToFirstByteMs: ttfb, maxLoadTimeMs: load,
+        timeoutRetry: { maxNumRetry: tries, retryDelayMs: 500, maxRetryDelayMs: 4000 },
+        errorRetry: { maxNumRetry: tries, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+      } });
       const hls = new Hls({
         startPosition: startAt > 0 ? startAt : -1,
         enableWorker: true,
@@ -1559,21 +1565,37 @@ const player = {
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
         backBufferLength: 30, // по умолчанию hls.js хранит весь прослушанный трек в памяти
+        fragLoadPolicy: policy(12000, 30000, 6),
+        keyLoadPolicy: policy(10000, 20000, 6),
+        playlistLoadPolicy: policy(10000, 20000, 4),
+        manifestLoadPolicy: policy(10000, 20000, 4),
       });
       this.hlsDeck[deckIdx] = hls;
       hls.on(Hls.Events.ERROR, async (_e, data) => {
         if (!data.fatal || id !== this.loadId) return;
-        // ссылка протухла — спрашиваем свежую и пробуем ещё раз
-        if (!retried && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          try {
-            const [fresh] = await vk('audio.getById', { audios: track.fullId }, { cache: false });
-            if (fresh && fresh.url && id === this.loadId) {
-              track.url = fresh.url;
-              return this.attach(fresh.url, id, track, true);
+        diag.add('сеть', `${track.artist} — ${track.title}: ${data.details}${data.response && data.response.code ? ' ' + data.response.code : ''}`);
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && retries < 3) {
+          // сбрасываем соединения, берём свежую ссылку и продолжаем с того же места
+          const at = audio.currentTime || startAt;
+          await bridge.resetNetwork().catch(() => {});
+          await new Promise((r) => setTimeout(r, 800 * (retries + 1)));
+          if (id !== this.loadId) return;
+          let next = url;
+          if (!track.substitute) {
+            try {
+              const [fresh] = await vk('audio.getById', { audios: track.fullId }, { cache: false });
+              if (fresh && fresh.url) next = track.url = fresh.url;
+            } catch {
+              /* играем по старой ссылке */
             }
-          } catch {
-            /* ниже — пропуск */
           }
+          if (id === this.loadId) return this.attach(next, id, track, retries + 1, at);
+          return;
+        }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && retries < 2) {
+          hls.recoverMediaError();
+          retries += 1;
+          return;
         }
         if (id === this.loadId) this.skipBroken();
       });

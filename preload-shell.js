@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('vkp', {
   geniusLyrics: (info) => ipcRenderer.invoke('genius-lyrics', info),
   lrclibLyrics: (info) => ipcRenderer.invoke('lrclib-lyrics', info),
   saveReport: (text) => ipcRenderer.invoke('save-report', text),
+  resetNetwork: () => ipcRenderer.invoke('reset-network'),
   installUpdate: () => ipcRenderer.send('update-install'),
   openUpdatePage: () => ipcRenderer.send('update-open-page'),
   onUpdateState: (fn) => ipcRenderer.on('update-state', (_e, st) => fn(st)),

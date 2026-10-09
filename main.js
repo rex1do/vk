@@ -816,6 +816,17 @@ function createMenu() {
 
 // --- Запуск --------------------------------------------------------------------------------
 
+// HTTP/2-соединение с серверами ВК со временем «залипает» (у части провайдеров и антивирусов),
+// и до перезапуска все запросы падают с ошибкой HTTP2. По HTTP/1.1 такого не бывает.
+app.commandLine.appendSwitch('disable-http2');
+
+// Сеть сбоит — закрываем все открытые соединения, следующий запрос откроет новые
+ipcMain.handle('reset-network', async () => {
+  await Promise.all([session.defaultSession, session.fromPartition(VK_PARTITION)]
+    .map((s) => s.closeAllConnections().catch(() => {})));
+  return true;
+});
+
 if (!app.requestSingleInstanceLock()) {
   app.quit(); // второй запуск просто показывает уже открытое окно
 } else {
