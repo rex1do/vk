@@ -310,6 +310,65 @@ function id3Tag({ title, artist, album }, cover) {
 
 // Звук трека целиком (MP3/AAC без контейнера): для скачивания и для сравнения версий
 // maxSeconds — только начало трека (для быстрой проверки версий)
+// Время первого звукового пакета MPEG-TS (PTS, 90 кГц) — по нему кусок трека точно ложится на шкалу плеера
+function firstPts(buf) {
+  if (buf[0] !== 0x47) return null;
+  for (let i = 0; i + 188 <= buf.length; i += 188) {
+    if (buf[i] !== 0x47 || !(buf[i + 1] & 0x40)) continue;
+    const afc = (buf[i + 3] >> 4) & 3;
+    let off = i + 4;
+    if (afc === 2) continue;
+    if (afc === 3) off += 1 + buf[off];
+    if (buf[off] !== 0 || buf[off + 1] !== 0 || buf[off + 2] !== 1) continue;
+    const streamId = buf[off + 3];
+    if (streamId < 0xc0 || streamId > 0xdf || !(buf[off + 7] & 0x80)) continue;
+    const p = buf.subarray(off + 9, off + 14);
+    return (p[0] & 0x0e) * 536870912 + p[1] * 4194304 + (p[2] & 0xfe) * 16384 + p[3] * 128 + (p[4] >> 1);
+  }
+  return null;
+}
+
+async function fetchSegment(seg, keys) {
+  let data = await fetchBuffer(seg.url);
+  if (seg.key) {
+    if (!keys.has(seg.key.uri)) keys.set(seg.key.uri, fetchBuffer(seg.key.uri));
+    const keyBytes = await keys.get(seg.key.uri);
+    const iv = seg.key.iv || Buffer.from(seg.seq.toString(16).padStart(32, '0'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-128-cbc', keyBytes, iv);
+    data = Buffer.concat([decipher.update(data), decipher.final()]);
+  }
+  return data;
+}
+
+// Кусок трека [start, start + seconds) для DJ-анализа: звук и точное время его начала на шкале трека
+async function fetchAudioWindow(url, start, seconds) {
+  if (!/\.m3u8/.test(url)) return { data: await fetchBuffer(url), startTime: 0, whole: true };
+  const segments = await hlsSegments(url);
+  let t = 0;
+  const picked = [];
+  let firstIndex = -1;
+  let approx = 0;
+  segments.forEach((seg, i) => {
+    const d = seg.duration || 10;
+    if (t + d > start && t < start + seconds) { if (firstIndex < 0) { firstIndex = i; approx = t; } picked.push(seg); }
+    t += d;
+  });
+  if (!picked.length) throw new Error('в треке нет такого куска');
+  const keys = new Map();
+  const parts = await Promise.all(picked.map((seg) => fetchSegment(seg, keys)));
+  let startTime = approx;
+  const ptsWin = firstPts(parts[0]);
+  if (ptsWin !== null) {
+    const pts0 = firstIndex === 0 ? ptsWin : firstPts(await fetchSegment(segments[0], keys));
+    if (pts0 !== null) {
+      let diff = ptsWin - pts0;
+      if (diff < 0) diff += 2 ** 33;
+      startTime = diff / 90000;
+    }
+  }
+  return { data: Buffer.concat(parts.map(demuxTs)), startTime };
+}
+
 async function fetchAudioData(url, onProgress = () => {}, maxSeconds = 0) {
   if (!/\.m3u8/.test(url)) return fetchBuffer(url);
   let segments = await hlsSegments(url);
@@ -691,6 +750,14 @@ ipcMain.handle('download', async (_e, info) => {
   }
 });
 ipcMain.on('show-file', (_e, file) => { if (file) shell.showItemInFolder(file); });
+ipcMain.handle('audio-window', async (_e, url, start, seconds) => {
+  try {
+    const { data, startTime, whole } = await fetchAudioWindow(url, Number(start) || 0, Number(seconds) || 40);
+    return { ok: true, startTime, whole: Boolean(whole), data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 ipcMain.handle('audio-data', async (_e, url, maxSeconds) => {
   try {
     const data = await fetchAudioData(url, () => {}, Number(maxSeconds) || 0);

@@ -537,6 +537,7 @@ function playlistCard(p) {
 function sectionHead(title, action) {
   return el('div', { class: 'section-head' },
     el('h2', { class: 'section-title', text: title || '' }),
+    auth.loggedIn && /^мои треки$/i.test(title || '') ? el('button', { class: 'more shuffle-all dj-mix-btn', title: 'Сведение как у диджея: треки подбираются по темпу и тональности', onclick: () => playDjMix() }, el('span', { class: 'dj-ico', text: 'DJ' }), 'DJ-микс') : null,
     auth.loggedIn && /^мои треки$/i.test(title || '') ? el('button', { class: 'more shuffle-all', title: 'Перемешать все мои треки', onclick: () => playAllMy(true) }, iconEl('shuffle'), 'Перемешать всё') : null,
     action ? el('button', { class: 'more', text: 'Все', onclick: () => router.go('section', { id: action.section_id, title, url: action.action && action.action.url }) }) : null);
 }
@@ -1038,6 +1039,7 @@ async function viewMy() {
   return [pageHead('Медиатека', 'Моя музыка', tracksWord(total), [
     el('button', { class: 'btn primary', onclick: () => playAllMy(false) }, iconEl('play'), 'Слушать'),
     el('button', { class: 'btn ghost', onclick: () => playAllMy(true) }, iconEl('shuffle'), 'Перемешать всё'),
+    el('button', { class: 'btn ghost', title: 'Сведение как у диджея: треки подбираются по темпу и тональности', onclick: () => playDjMix() }, el('span', { class: 'dj-ico', text: 'DJ' }), 'DJ-микс'),
   ]), list];
 }
 
@@ -1361,6 +1363,26 @@ const crossfade = {
   },
 };
 
+// настройки загрузчика потока: сеть иногда моргает — кусочки перезапрашиваем терпеливо
+function hlsConfig() {
+  const policy = (ttfb, load, tries) => ({ default: {
+    maxTimeToFirstByteMs: ttfb, maxLoadTimeMs: load,
+    timeoutRetry: { maxNumRetry: tries, retryDelayMs: 500, maxRetryDelayMs: 4000 },
+    errorRetry: { maxNumRetry: tries, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+  } });
+  return {
+    enableWorker: true,
+    startFragPrefetch: true,
+    maxBufferLength: 30,
+    maxMaxBufferLength: 60,
+    backBufferLength: 30, // по умолчанию hls.js хранит весь прослушанный трек в памяти
+    fragLoadPolicy: policy(12000, 30000, 6),
+    keyLoadPolicy: policy(10000, 20000, 6),
+    playlistLoadPolicy: policy(10000, 20000, 4),
+    manifestLoadPolicy: policy(10000, 20000, 4),
+  };
+}
+
 const player = {
   queue: [],
   order: [],
@@ -1474,10 +1496,15 @@ const player = {
     if (!track) return;
     if (this.mix) this.extendMix();
     const id = ++this.loadId;
+    // DJ-переход: следующий трек уже играет на запасной деке — она просто становится основной
+    const take = dj.takeover && dj.takeover.track === track ? dj.takeover : null;
+    dj.takeover = null;
+    if (!take) dj.abort();
     // плавный переход — только при автоматической смене трека в конце; ручное переключение мгновенное
-    const fadeSec = this.pendingFade;
+    const fadeSec = take ? 0 : this.pendingFade;
     this.pendingFade = 0;
-    if (fadeSec > 0) this.swapDeck(fadeSec);
+    if (take) deckIdx = take.deck;
+    else if (fadeSec > 0) this.swapDeck(fadeSec);
     else {
       // ручное переключение: прошлый трек замолкает сразу, даже если новый ещё грузится
       const d = deck();
@@ -1487,6 +1514,16 @@ const player = {
     this.current = track;
     renderNowPlaying();
     this.markRows();
+    if (take) {
+      track.substitute = take.substitute || null;
+      if (track.substitute && !uncensor.jobs.has(track.key)) uncensor.status.set(track.key, uncensor.statusFromMemo(track));
+      else if (!track.substitute && uncensor.applies(track) && uncensor.get(track.key) === undefined) {
+        setTimeout(() => { if (id === this.loadId) uncensor.analyze(track).then((alt) => this.useSubstitute(track, alt, id)); }, 4000);
+      }
+      renderUncensorStatus();
+      renderSubstitute();
+      return;
+    }
     if (!track.url) {
       try {
         const [fresh] = await vk('audio.getById', { audios: track.fullId }, { cache: false });
@@ -1540,6 +1577,8 @@ const player = {
   // найдена версия без цензуры — переключаемся на неё на той же секунде
   async useSubstitute(track, alt, id = this.loadId) {
     if (!alt || id !== this.loadId || this.current !== track) return;
+    // посреди DJ-перехода звук не дёргаем — подменим, когда переход закончится
+    if (dj.mixing) { setTimeout(() => this.useSubstitute(track, alt, id), 1500); return; }
     // запомненная раньше замена другой длины (мешап и т.п.) — забываем и не включаем
     if (!alt.manual && alt.duration && uncensor.durationOff(track, alt)) {
       delete uncensor.memo[track.key];
@@ -1559,25 +1598,14 @@ const player = {
   attach(url, id, track, retries = 0, startAt = 0) {
     const wasPaused = audio.paused && startAt > 0;
     this.destroyHls();
+    if (!dj.mixing) {
+      deck().defaultPlaybackRate = 1;
+      deck().playbackRate = 1;
+      eq.deckFx(deckIdx, { low: 0, hp: 10 });
+    }
     if (/\.m3u8/.test(url) && window.Hls && Hls.isSupported()) {
       // сеть иногда моргает: кусочки потока перезапрашиваем терпеливо, а не сдаёмся сразу
-      const policy = (ttfb, load, tries) => ({ default: {
-        maxTimeToFirstByteMs: ttfb, maxLoadTimeMs: load,
-        timeoutRetry: { maxNumRetry: tries, retryDelayMs: 500, maxRetryDelayMs: 4000 },
-        errorRetry: { maxNumRetry: tries, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
-      } });
-      const hls = new Hls({
-        startPosition: startAt > 0 ? startAt : -1,
-        enableWorker: true,
-        startFragPrefetch: true,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        backBufferLength: 30, // по умолчанию hls.js хранит весь прослушанный трек в памяти
-        fragLoadPolicy: policy(12000, 30000, 6),
-        keyLoadPolicy: policy(10000, 20000, 6),
-        playlistLoadPolicy: policy(10000, 20000, 4),
-        manifestLoadPolicy: policy(10000, 20000, 4),
-      });
+      const hls = new Hls({ ...hlsConfig(), startPosition: startAt > 0 ? startAt : -1 });
       this.hlsDeck[deckIdx] = hls;
       hls.on(Hls.Events.ERROR, async (_e, data) => {
         if (!data.fatal || id !== this.loadId) return;
@@ -1692,6 +1720,7 @@ const player = {
 
   toggle() {
     if (!this.current) return;
+    if (dj.mixing) dj.abort(); // пауза посреди DJ-перехода — старый трек сразу умолкает
     const d = deck();
     const soft = crossfade.enabled && !this.fadeInNext;
     if (d.paused || d.pausing) {
@@ -1715,6 +1744,7 @@ const player = {
 
   // автоматический переход заранее, до конца трека
   maybeCrossfade() {
+    if (dj.blocksCrossfade()) return;
     if (!crossfade.enabled || this.crossLock || this.repeat === 'one' || !this.current) return;
     const d = deck();
     const left = (d.duration || 0) - d.currentTime;
@@ -2832,7 +2862,19 @@ const eq = {
       this.analyser = ctx.createAnalyser();
       this.analyser.fftSize = 512;
       this.analyser.smoothingTimeConstant = 0.6;
-      sources.forEach((src) => src.connect(this.filters[0]));
+      // на каждой деке свои фильтры для DJ-переходов: срез баса и фильтр высоких частот
+      this.fx = sources.map((src) => {
+        const low = ctx.createBiquadFilter();
+        low.type = 'lowshelf';
+        low.frequency.value = 200;
+        low.gain.value = 0;
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 10;
+        hp.Q.value = 0.7;
+        src.connect(low).connect(hp).connect(this.filters[0]);
+        return { low, hp };
+      });
       [...this.filters, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
       this.ctx = ctx;
       this.apply();

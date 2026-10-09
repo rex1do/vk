@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('vkp', {
   lrclibLyrics: (info) => ipcRenderer.invoke('lrclib-lyrics', info),
   saveReport: (text) => ipcRenderer.invoke('save-report', text),
   resetNetwork: () => ipcRenderer.invoke('reset-network'),
+  audioWindow: (url, start, seconds) => ipcRenderer.invoke('audio-window', url, start, seconds),
   installUpdate: () => ipcRenderer.send('update-install'),
   openUpdatePage: () => ipcRenderer.send('update-open-page'),
   onUpdateState: (fn) => ipcRenderer.on('update-state', (_e, st) => fn(st)),
