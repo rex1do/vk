@@ -1540,6 +1540,14 @@ const player = {
   // найдена версия без цензуры — переключаемся на неё на той же секунде
   async useSubstitute(track, alt, id = this.loadId) {
     if (!alt || id !== this.loadId || this.current !== track) return;
+    // запомненная раньше замена другой длины (мешап и т.п.) — забываем и не включаем
+    if (!alt.manual && alt.duration && uncensor.durationOff(track, alt)) {
+      delete uncensor.memo[track.key];
+      try { localStorage.setItem('uncensorMemo5', JSON.stringify(uncensor.memo)); } catch { /* не страшно */ }
+      diag.add('18+', `${track.artist} — ${track.title}: отброшена замена другой длины (${alt.duration} с вместо ${track.duration} с)`);
+      uncensor.analyze(track).then((fresh) => { if (fresh && !uncensor.durationOff(track, fresh)) this.useSubstitute(track, fresh, id); });
+      return;
+    }
     const altUrl = await uncensor.urlOf(alt);
     if (!altUrl || id !== this.loadId) return;
     track.substitute = { ...alt, url: altUrl };
@@ -2958,11 +2966,10 @@ const uncensor = {
     return '';
   },
 
-  // длительность: ±12 с подходит; явно неверная (в разы больше/меньше) — тоже проверяем
+  // длительность: ±12 с подходит. Сильно длиннее — это мешап, сборник или «весь альбом»
+  // с этим треком внутри: звук в начале совпадёт, но это не та запись
   durationOff(orig, c) {
-    const d = Math.abs(c.duration - orig.duration);
-    const broken = c.duration > orig.duration * 1.6 || c.duration < orig.duration * 0.6;
-    return d > 12 && !broken;
+    return Math.abs(c.duration - orig.duration) > 12;
   },
 
   async candidates(track, st) {
