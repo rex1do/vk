@@ -235,6 +235,10 @@ function compareOnce(licensedRaw, otherRaw, { maxShiftSec = 12 } = {}) {
   close();
   const spotShare = counted ? spotWindows / counted : 0;
   if (spots >= 1 && level < 0.95) return { verdict: 'different', corr: share, spots, lag: lagSec, level };
+  // вне мест цензуры та же запись совпадает почти полностью; у ремикса с тем же голосом
+  // (рок-версия, другой бит) отличается вся музыка между словами
+  const outside = counted - spotWindows > 0 ? matched / (counted - spotWindows) : 0;
+  if (outside < 0.85) return { verdict: 'different', corr: share, spots, lag: lagSec, level, outside };
   const verdict = spots >= 1 && spotShare < 0.35 ? 'uncensored' : 'same';
   return { verdict, corr: share, spots, lag: lagSec, level };
 }

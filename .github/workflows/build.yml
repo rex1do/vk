@@ -3,7 +3,6 @@ name: Build Windows
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -20,15 +19,14 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
-      - name: Build
-        run: npm run dist
+      - name: Build and publish release
+        # каждая сборка из main публикуется как релиз vX.Y.Z — программа при запуске проверяет его
+        # и обновляется сама (latest.yml + установщик); версию в package.json поднимаем при каждом выпуске
+        run: npm run release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
           name: VKPlayer-windows
           path: |
             dist/*.exe
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.exe

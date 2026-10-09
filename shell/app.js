@@ -2819,6 +2819,8 @@ const NOT_ORIGINAL = [
   'demo', 'демо', 'radio', 'tiktok', 'tik tok', 'extended', 'перепев', 'пародия', 'parody', 'mix', 'vip',
   'bootleg', 'flip', 'rework', 'snippet', 'сниппет', 'нарезка', 'clean', 'censored', 'цензура', 'cut', 'short',
   'без мата', 'без матов', 'без мата', 'no mat', 'нет мата', 'чистая версия', 'радио версия', 'type beat', 'beat', 'бит',
+  'rock', 'рок', 'metal', 'метал', 'punk', 'панк', 'orchestral', 'оркестр', 'piano', 'пианино', 'lofi', 'lo-fi', 'jazz', 'джаз',
+  'drill', 'дрилл', 'house', 'hardstyle', 'techno', 'техно', 'trap', 'трэп', 'dubstep', 'reggaeton', 'rework', 'version 2', 'v2',
 ];
 const notOriginalRe = new RegExp(`(?<![\\p{L}\\p{N}])(${NOT_ORIGINAL.map((w) => w.replace(/ /g, '\\s*')).join('|')})(?![\\p{L}\\p{N}])`, 'iu');
 const EVIDENCE_RE = /(?<![\p{L}\p{N}])(uncensored|explicit|без цензуры|нецензур|18\+|original|оригинал|album version)(?![\p{L}\p{N}])/iu;
@@ -3529,6 +3531,18 @@ $$('[data-window]').forEach((btn) => btn.addEventListener('click', () => bridge.
 bridge.onWindowState(({ maximized, fullscreen }) => {
   $('#window-buttons').classList.toggle('maximized', maximized);
   if (!fullscreen) document.body.classList.remove('immersive');
+});
+
+// --- Обновление программы ------------------------------------------------------------------
+bridge.onUpdateState((st) => {
+  diag.add('update', JSON.stringify(st));
+  if (st.state === 'ready') {
+    toast(`Версия ${st.version} готова — нажмите, чтобы перезапустить и обновить`, { onClick: () => bridge.installUpdate(), duration: 20000 });
+  } else if (st.state === 'available-portable') {
+    toast(`Вышла версия ${st.version} — нажмите, чтобы скачать`, { onClick: () => bridge.openUpdatePage(), duration: 15000 });
+  } else if (st.state === 'downloading' && st.version) {
+    toast(`Скачивается обновление ${st.version}…`);
+  }
 });
 
 // --- Старт ---------------------------------------------------------------------------------

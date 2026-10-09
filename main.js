@@ -719,7 +719,40 @@ ipcMain.on('track-title', (_e, title) => {
 ipcMain.on('shell-ready', () => {
   sendToShell('window-state', { maximized: win.isMaximized() });
   if (loggedIn !== null) sendToShell('auth-changed', { loggedIn });
+  checkForUpdates();
 });
+
+// --- Обновления ----------------------------------------------------------------------------
+// При запуске проверяем релизы на GitHub. Установленная версия скачивает обновление в фоне
+// и ставит его при выходе (или сразу по кнопке); переносная (portable) — только сообщает.
+const RELEASES_URL = 'https://github.com/rex1do/vk/releases/latest';
+let updateChecked = false;
+function checkForUpdates() {
+  if (updateChecked || !app.isPackaged) return;
+  updateChecked = true;
+  const portable = Boolean(process.env.PORTABLE_EXECUTABLE_FILE);
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch {
+    return;
+  }
+  autoUpdater.autoDownload = !portable;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('update-available', (info) => sendToShell('update-state', { state: portable ? 'available-portable' : 'downloading', version: info.version }));
+  autoUpdater.on('download-progress', (p) => sendToShell('update-state', { state: 'downloading', percent: Math.round(p.percent || 0) }));
+  autoUpdater.on('update-downloaded', (info) => sendToShell('update-state', { state: 'ready', version: info.version }));
+  autoUpdater.on('error', (err) => sendToShell('update-state', { state: 'error', error: String(err && err.message || err).slice(0, 200) }));
+  autoUpdater.checkForUpdates().catch(() => {});
+}
+ipcMain.on('update-install', () => {
+  try {
+    const { autoUpdater } = require('electron-updater');
+    quitting = true;
+    autoUpdater.quitAndInstall(true, true);
+  } catch { /* обновления недоступны */ }
+});
+ipcMain.on('update-open-page', () => shell.openExternal(RELEASES_URL));
 
 // --- Трей и меню ---------------------------------------------------------------------------
 

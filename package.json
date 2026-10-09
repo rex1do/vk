@@ -1,13 +1,14 @@
 {
   "name": "vk-player",
   "productName": "VK Player",
-  "version": "4.13.3",
+  "version": "4.14.0",
   "description": "Десктопный плеер ВК Музыки со своим интерфейсом в стиле liquid glass",
   "main": "main.js",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win --publish never"
+    "dist": "electron-builder --win --publish never",
+    "release": "electron-builder --win --publish always"
   },
   "devDependencies": {
     "electron": "^38.0.0",
@@ -55,6 +56,17 @@
     "electronLanguages": [
       "ru",
       "en-US"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "rex1do",
+        "repo": "vk",
+        "releaseType": "release"
+      }
     ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }
