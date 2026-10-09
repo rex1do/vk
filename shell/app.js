@@ -1341,11 +1341,21 @@ const audio = new Proxy({}, {
 // --- Плавные переходы между треками (кроссфейд) ---------------------------------------------
 let userVolume = 1;
 const applyVolume = (d) => { d.volume = Math.max(0, Math.min(1, userVolume * d.fade)); };
+// Переходы — что-то одно: нет, плавные (кроссфейд) или DJ-сет
+const transitions = {
+  mode: localStorage.getItem('transitions')
+    || (localStorage.getItem('djMode') === '1' ? 'dj' : localStorage.getItem('crossfade') === '0' ? 'none' : 'fade'),
+  set(mode) {
+    this.mode = mode;
+    localStorage.setItem('transitions', mode);
+    if (typeof dj !== 'undefined') dj.modeChanged();
+    renderCrossfade();
+  },
+};
 const crossfade = {
-  enabled: localStorage.getItem('crossfade') !== '0', // включено по умолчанию
+  get enabled() { return transitions.mode === 'fade'; },
   seconds: Number(localStorage.getItem('crossfadeSec')) || 6,
   save() {
-    localStorage.setItem('crossfade', this.enabled ? '1' : '0');
     localStorage.setItem('crossfadeSec', String(this.seconds));
   },
   // плавно меняем громкость деки (равная мощность: косинус/синус), таймером — работает и в свёрнутом окне
@@ -1722,7 +1732,7 @@ const player = {
     if (!this.current) return;
     if (dj.mixing) dj.abort(); // пауза посреди DJ-перехода — старый трек сразу умолкает
     const d = deck();
-    const soft = crossfade.enabled && !this.fadeInNext;
+    const soft = transitions.mode !== 'none' && !this.fadeInNext;
     if (d.paused || d.pausing) {
       // нажали «играть» (в том числе пока звук ещё затихал) — продолжаем с плавным нарастанием
       d.pausing = false;
@@ -3357,13 +3367,15 @@ const uncensorDetails = {
 
 // настройки плавных переходов (в панели эквалайзера)
 function renderCrossfade() {
-  $('#crossfade-on').checked = crossfade.enabled;
+  $$('#tr-seg [data-tr]').forEach((b) => { const on = b.dataset.tr === transitions.mode; b.classList.toggle('active', on); b.setAttribute('aria-checked', on); });
   $('#crossfade-sec').value = String(crossfade.seconds);
   $('#crossfade-val').textContent = `${crossfade.seconds} с`;
-  $('#cf-row').classList.toggle('off', !crossfade.enabled);
+  $('#cf-row').hidden = transitions.mode !== 'fade';
+  $('#tr-note').textContent = transitions.mode === 'dj' ? 'Следующий трек подбирается по темпу и тональности, переход сводится в такт' : '';
+  $('#tr-note').hidden = transitions.mode !== 'dj';
   setFill($('#crossfade-sec'));
 }
-$('#crossfade-on').addEventListener('change', () => { crossfade.enabled = $('#crossfade-on').checked; crossfade.save(); renderCrossfade(); });
+$$('#tr-seg [data-tr]').forEach((b) => b.addEventListener('click', () => transitions.set(b.dataset.tr)));
 $('#crossfade-sec').addEventListener('input', () => { crossfade.seconds = Number($('#crossfade-sec').value); crossfade.save(); renderCrossfade(); });
 renderCrossfade();
 

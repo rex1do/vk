@@ -913,3 +913,12 @@ body.fs-idle .fullscreen.mode-cover .fs-cover { max-height: min(60vh, 620px); }
 .fs-dj { display: inline-block; margin-top: 8px; padding: 3px 10px; border-radius: 10px; background: rgba(255,255,255,.1); color: rgba(255,255,255,.8); font-size: 12px; font-weight: 700; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
 .fs-dj[hidden] { display: none; }
 .fullscreen.mode-cover .fs-dj { margin-top: 6px; }
+
+/* выбор переходов: нет / плавные / DJ-сет */
+.tr-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 13.5px; }
+.tr-seg { display: flex; padding: 3px; border-radius: 12px; background: rgba(255,255,255,.07); flex: none; }
+.tr-seg button { height: 28px; padding: 0 12px; border-radius: 9px; color: var(--muted); font-size: 12.5px; font-weight: 650; transition: background .2s, color .2s; }
+.tr-seg button:hover { color: var(--text); }
+.tr-seg button.active { background: rgba(255,255,255,.9); color: #111; }
+.tr-note { color: var(--faint); font-size: 12px; padding: 0 0 4px; }
+.tr-note[hidden], .cf-row[hidden] { display: none; }

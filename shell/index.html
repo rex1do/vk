@@ -273,9 +273,15 @@
     <div class="eq-bands" id="eq-bands"></div>
     <div class="eq-foot">
       <label class="switch-row"><span>Подменять зацензуренные треки оригиналом</span><span class="switch"><input type="checkbox" id="uncensor-on"><span></span></span></label>
-      <label class="switch-row"><span>Плавные переходы между треками</span><span class="switch"><input type="checkbox" id="crossfade-on"><span></span></span></label>
+      <div class="tr-row"><span>Переходы между треками</span>
+        <div class="tr-seg" id="tr-seg" role="radiogroup">
+          <button data-tr="none" role="radio">Нет</button>
+          <button data-tr="fade" role="radio" title="Конец трека плавно перетекает в начало следующего">Плавные</button>
+          <button data-tr="dj" role="radio" title="Как DJ-сет: треки подбираются по темпу и тональности, переход сводится в такт">DJ-сет</button>
+        </div>
+      </div>
       <div class="cf-row" id="cf-row"><span>Длительность</span><input type="range" id="crossfade-sec" min="1" max="12" step="1"><b id="crossfade-val"></b></div>
-      <label class="switch-row" title="Следующий трек подбирается по темпу и тональности, переход сводится в такт, как у диджея"><span>DJ-переходы: подбор по темпу и тональности</span><span class="switch"><input type="checkbox" id="dj-on"><span></span></span></label>
+      <div class="tr-note" id="tr-note"></div>
       <div class="eq-links"><button class="link-btn" id="uc-open">Проверка текущего трека</button><button class="link-btn" id="report-save">Сохранить отчёт для разработчика</button></div>
     </div>
   </div>

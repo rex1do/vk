@@ -7,7 +7,7 @@ const DJ_RATE = 11025;
 const djSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const dj = {
-  enabled: localStorage.getItem('djMode') === '1',
+  get enabled() { return transitions.mode === 'dj'; },
   // темп и тональность уже разобранных треков (по ключу трека)
   data: (() => { try { return JSON.parse(localStorage.getItem('djData1') || '{}'); } catch { return {}; } })(),
   failed: new Set(),
@@ -22,12 +22,10 @@ const dj = {
   ramp: 0,
   timer: 0,
 
-  setEnabled(on) {
-    this.enabled = on;
-    localStorage.setItem('djMode', on ? '1' : '0');
-    if (!on) this.abort();
+  modeChanged() {
+    if (!this.enabled) this.abort();
     renderDj();
-    if (on) this.kick();
+    if (this.enabled) this.kick();
   },
 
   saveData() {
@@ -194,9 +192,9 @@ const dj = {
   },
 
   // --- Переход ------------------------------------------------------------------------------------
-  // обычный кроссфейд нужен, только если DJ-переход не получился
+  // в режиме DJ-сета кроссфейда нет совсем: не получилось свести — следующий трек просто сменяет текущий
   blocksCrossfade() {
-    return this.enabled && (this.mixing || Boolean(this.plan && !this.plan.fallback));
+    return this.enabled;
   },
 
   tick() {
@@ -204,11 +202,12 @@ const dj = {
     const A = deck();
     if (this.mixing) return;
     const left = (A.duration || 0) - A.currentTime;
-    if (!this.plan && !A.paused && isFinite(left) && left < 100 && left > 25 && A.duration > 90 && this.nextPos() !== null) this.prepare();
+    if (!this.plan && !A.paused && isFinite(left) && left < 100 && left > 6 && A.duration > 30 && this.nextPos() !== null) this.prepare();
     const p = this.plan;
     if (p && p.ready && !p.fallback && !A.paused) {
       if (A.currentTime >= p.startA - 0.006) {
-        if (A.currentTime > p.startA + 0.25) { this.fail('момент перехода пропущен'); return; }
+        // момент проскочили (перемотка, подвисание) — сводим прямо сейчас, без привязки к доле
+        if (A.currentTime > p.startA + 0.25) { p.startB += (A.currentTime - p.startA) * p.r; p.startA = A.currentTime; p.loose = true; }
         this.start();
       } else if (p.startA - A.currentTime < 1.2 && !this.timer) {
         // последнюю секунду следим чаще, чтобы попасть в долю
@@ -217,10 +216,26 @@ const dj = {
     }
   },
 
-  fail(why) {
-    if (this.plan) { this.plan.fallback = true; diag.add('dj', `переход без сведения: ${why}`); }
-    this.releaseSpare();
+  // точный расчёт не удался — сводим по запасной схеме: последние ~8 секунд, без подгонки темпа
+  async fail(why) {
+    const p = this.plan;
     clearInterval(this.timer); this.timer = 0;
+    if (!p || p.ready || p.simple) { if (p) p.fallback = true; this.releaseSpare(); return; }
+    diag.add('dj', `простое сведение: ${why}`);
+    const A = deck(), id = player.loadId;
+    Object.assign(p, { simple: true, beatmatched: false, r: 1, pA: 0.5, L: 16, startB: 0, entryB: 8, exitA: A.duration - 0.5, outro: false, drop: false });
+    p.startA = Math.max(A.currentTime + 2, A.duration - 8.5);
+    try {
+      p.src = p.src || await this.sourceFor(p.next);
+      if (!p.src.url) throw new Error('нет ссылки на следующий трек');
+      await this.loadSpare(p.src.url, 0, 1);
+      if (this.plan !== p || id !== player.loadId) { this.releaseSpare(); return; }
+      p.ready = true;
+    } catch (err) {
+      p.fallback = true;
+      this.releaseSpare();
+      diag.add('dj', `сведение не получилось: ${err.message}`);
+    }
   },
 
   // ссылка на версию следующего трека (без цензуры, если она уже известна)
@@ -252,7 +267,7 @@ const dj = {
       if (this.plan !== p || id !== player.loadId) return;
       Object.assign(p, this.plan_(ra, rb, wa.startTime, A));
       if (!p.startA) throw new Error('нет места для перехода');
-      if (p.startA < A.currentTime + 5) throw new Error('не успели подготовить');
+      if (p.startA < A.currentTime + 3) throw new Error('не успели подготовить');
       p.src = src;
       await this.loadSpare(src.url, p.startB, p.r);
       if (this.plan !== p || id !== player.loadId) { this.releaseSpare(); return; }
@@ -289,10 +304,10 @@ const dj = {
       for (let k = 0; firstA + k * pA <= endA; k++) if ((k - db) % 16 === 0) bounds.push(firstA + k * pA);
       // затишье: следующие 8 долей заметно тише предыдущих 16 — начинается аутро
       const drop = (b) => level(ra, b - tailStart - 16 * pA, b - tailStart) - level(ra, b - tailStart, b - tailStart + 8 * pA);
-      const lulls = bounds.filter((b) => b > A.currentTime + 25 && b >= endA - 60 && b <= endA - 4 && drop(b) > 2.5);
+      const lulls = bounds.filter((b) => b > A.currentTime + 12 && b >= endA - 60 && b <= endA - 4 && drop(b) > 2.5);
       if (lulls.length) { exitA = lulls.reduce((x, y) => (drop(y) > drop(x) ? y : x)); outro = true; }
       else {
-        const fit = bounds.filter((b) => b <= endA - 0.5 && b > A.currentTime + 25);
+        const fit = bounds.filter((b) => b <= endA - 0.5 && b > A.currentTime + 8);
         exitA = fit.length ? fit[fit.length - 1] : endA;
       }
     }
@@ -477,8 +492,6 @@ eq.deckFx = function deckFx(i, { low, hp }, tau = 0) {
 
 // --- Интерфейс ------------------------------------------------------------------------------------
 function renderDj() {
-  const on = $('#dj-on');
-  if (on) on.checked = dj.enabled;
   const badge = $('#fs-dj');
   if (!badge) return;
   const t = player.current;
@@ -487,7 +500,6 @@ function renderDj() {
   if (info && info.bpm) badge.textContent = `DJ · ${Math.round(info.bpm * (t && deck().playbackRate || 1))} BPM · ${info.camelot}`;
 }
 
-$('#dj-on').addEventListener('change', () => dj.setEnabled($('#dj-on').checked));
 audio.addEventListener('timeupdate', () => dj.tick());
 audio.addEventListener('playing', () => { dj.kick(); renderDj(); });
 decks.forEach((d, i) => d.addEventListener('seeking', () => {
@@ -499,7 +511,7 @@ renderDj();
 
 // запуск DJ-микса из своей музыки
 async function playDjMix() {
-  if (!dj.enabled) dj.setEnabled(true);
+  if (!dj.enabled) transitions.set('dj');
   toast('DJ-микс: треки подбираются по темпу и тональности');
   await playAllMy(true);
 }
