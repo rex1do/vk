@@ -2586,7 +2586,7 @@ const library = {
         const items = resp.items || [];
         items.forEach((a) => {
           this.keys.add(`${a.owner_id}_${a.id}`);
-          this.ids.set(`${a.owner_id}_${a.id}`, { owner_id: a.owner_id, id: a.id });
+          this.ids.set(`${a.owner_id}_${a.id}`, { owner_id: a.owner_id, id: a.id, pos: offset + items.indexOf(a) });
           (a.main_artists || []).forEach((x) => x.name && libraryArtists.add(x.name.toLowerCase()));
           if (a.artist) libraryArtists.add(a.artist.toLowerCase());
         });
@@ -2612,19 +2612,34 @@ const library = {
         const me = auth.me.id;
         const stored = this.ids.get(t.key);
         const copy = this.copies[t.key];
+        // 1) копия, номер которой ВК вернул при добавлении; 2) по полному номеру трека (audio_ids) —
+        // ВК сам находит копию в списке; запрос «owner_id + audio_id оригинала» ВК подтверждает,
+        // но ничего не удаляет, поэтому его нет
+        const copyOwner = (copy && copy.owner_id) || me;
+        const copyId = copy && (copy.id || copy);
         const attempts = [
-          copy && ['audio.delete', { owner_id: me, audio_id: copy }],
-          stored && ['audio.delete', { owner_id: stored.owner_id, audio_id: stored.id }],
-          ['audio.delete', { owner_id: me, audio_id: t.id }],
-          ['audio.delete', { owner_id: t.owner_id, audio_id: t.id }],
-          ['audio.removeFromPlaylist', { owner_id: me, playlist_id: -1, audio_ids: t.fullId }],
-          ['audio.removeFromPlaylist', { owner_id: me, playlist_id: -1, audio_ids: t.key }],
+          copyId && ['audio.delete', { owner_id: copyOwner, audio_id: copyId }],
+          ['audio.delete', { owner_id: me, audio_ids: t.key }],
+          t.access_key && ['audio.delete', { owner_id: me, audio_ids: t.fullId }],
+          stored && stored.owner_id === me && ['audio.delete', { owner_id: me, audio_id: stored.id }],
         ].filter(Boolean);
+        // ВК может ответить «удалено», ничего не удалив, — проверяем по самому списку
+        const stillThere = async () => {
+          const at = stored && stored.pos !== undefined ? stored.pos : 0;
+          for (const offset of [Math.max(0, at - 20), 0]) {
+            const page = await vk('audio.get', { owner_id: me, offset, count: 60 }, { cache: false }).catch(() => null);
+            if (page && (page.items || []).some((a) => `${a.owner_id}_${a.id}` === t.key)) return true;
+            if (offset === 0) break;
+          }
+          return false;
+        };
         let done = false, lastErr = null;
         for (const [method, params] of attempts) {
           try {
             const res = await vk(method, params, { cache: false });
-            diag.add('library', `${method} ${JSON.stringify(params)} → ${JSON.stringify(res)}`);
+            const left = await stillThere();
+            diag.add('library', `${method} ${JSON.stringify(params)} → ${JSON.stringify(res)}; в списке ${left ? 'остался' : 'нет'}`);
+            if (left) continue;
             done = true;
             break;
           } catch (err) {
@@ -2645,10 +2660,13 @@ const library = {
       } else {
         const params = { audio_id: t.id, owner_id: t.owner_id };
         if (t.access_key) params.access_key = t.access_key;
-        const newId = await vk('audio.add', params, { cache: false });
-        diag.add('library', `audio.add → ${JSON.stringify(newId)}`);
-        if (typeof newId === 'number') {
-          this.copies[t.key] = newId;
+        const res = await vk('audio.add', params, { cache: false });
+        diag.add('library', `audio.add → ${JSON.stringify(res)}`);
+        // ВК отвечает либо числом, либо { items: [{ new_audio_id, new_owner_id }] }
+        const item = res && res.items && res.items[0];
+        const newId = typeof res === 'number' ? res : item && item.new_audio_id;
+        if (newId) {
+          this.copies[t.key] = { id: newId, owner_id: (item && item.new_owner_id) || auth.me.id };
           try { localStorage.setItem('addedCopies', JSON.stringify(this.copies)); } catch { /* не страшно */ }
         }
         this.keys.add(t.key);
