@@ -555,6 +555,10 @@ function playButtons(getTracks) {
   return [
     el('button', { class: 'btn primary', onclick: async () => player.playList(await getTracks(), 0, { shuffle: false }) }, iconEl('play'), 'Слушать'),
     el('button', { class: 'btn ghost', onclick: async () => player.playList(await getTracks(), 0, { shuffle: true }) }, iconEl('shuffle'), 'Перемешать'),
+    el('button', {
+      class: 'btn ghost', title: 'Как DJ-сет: треки по порядку, без длинных вступлений и концовок, со сведением в такт',
+      onclick: async () => { player.playList(await getTracks(), 0, { shuffle: false, djSet: true }); toast('DJ-сет: треки по порядку, со сведением'); },
+    }, el('span', { class: 'dj-ico', text: 'DJ' }), 'DJ-сет'),
   ];
 }
 
@@ -1408,6 +1412,7 @@ const player = {
   mixLoading: false,
 
   async startMix() {
+    this.djSet = false;
     const tracks = await this.fetchMix(false);
     if (!tracks.length) { toast('VK Микс сейчас недоступен'); return; }
     this.mix = true;
@@ -1459,8 +1464,14 @@ const player = {
     renderQueue();
   },
 
-  playList(tracks, index, { shuffle } = {}) {
+  // djSet — сыграть как DJ-сет: порядок сохраняется, переходы сводятся, даже если они выключены
+  djSet: false,
+
+  playList(tracks, index, { shuffle, djSet = false } = {}) {
     if (!tracks || !tracks.length) return;
+    const wasDj = this.djSet;
+    this.djSet = djSet;
+    if (wasDj !== djSet) renderDj();
     if (this.mix) { this.mix = false; renderMixState(); }
     if (shuffle !== undefined) this.setShuffle(shuffle);
     const same = this.current && tracks[index] && tracks[index].key === this.current.key && this.queue === tracks;

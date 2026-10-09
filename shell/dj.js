@@ -7,7 +7,7 @@ const DJ_RATE = 11025;
 const djSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const dj = {
-  get enabled() { return transitions.mode === 'dj'; },
+  get enabled() { return transitions.mode === 'dj' || player.djSet; },
   // темп и тональность уже разобранных треков (по ключу трека)
   data: (() => { try { return JSON.parse(localStorage.getItem('djData1') || '{}'); } catch { return {}; } })(),
   failed: new Set(),
@@ -167,7 +167,8 @@ const dj = {
 
   // ставим следующим самый подходящий из ближайших разобранных треков
   arrange() {
-    if (!this.enabled || !player.current || this.plan || this.mixing) return;
+    // альбом или плейлист, запущенный как DJ-сет, играет в своём порядке
+    if (!this.enabled || player.djSet || !player.current || this.plan || this.mixing) return;
     const cur = this.data[player.current.key];
     if (!cur) return;
     const cands = this.upcoming(10).filter((x) => x.t && this.data[x.t.key]);
