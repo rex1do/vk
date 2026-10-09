@@ -290,7 +290,7 @@ body.is-playing .row.playing .eq { display: flex; }
 /* --- Нижняя панель: плавающая капсула --- */
 .player {
   grid-area: player; margin-top: var(--gap);
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 580px) minmax(0, 1fr);
+  display: grid; grid-template-columns: minmax(150px, 1fr) minmax(260px, 580px) minmax(max-content, 1fr);
   align-items: center; gap: 18px; padding: 0 16px 0 12px; border-radius: 30px;
 }
 .track { display: flex; align-items: center; gap: 12px; min-width: 0; cursor: pointer; border-radius: 18px; padding: 4px; margin: -4px; transition: background .15s; }
@@ -405,7 +405,7 @@ body:not(.is-playing) .fs-cover { transform: scale(.95); }
 .fs-title-row { display: flex; align-items: center; gap: 12px; }
 .fs-titles { flex: 1; min-width: 0; }
 .fs-actions { display: flex; align-items: center; gap: 2px; flex: none; }
-.fullscreen.mode-cover .fs-title-row { flex-direction: column; gap: 6px; }
+.fullscreen.mode-cover .fs-title-row { flex-direction: column; gap: 12px; }
 .fullscreen.mode-cover .fs-titles { width: 100%; }
 .fs-title { font-size: clamp(22px, 2.2vw, 28px); font-weight: 750; letter-spacing: -.02em; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fs-artist { color: rgba(240,242,250,.72); font-size: 16px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -419,7 +419,7 @@ body:not(.is-playing) .fs-cover { transform: scale(.95); }
 
 /* режим «Обложка»: крупная обложка по центру на живом фоне */
 .fullscreen.mode-cover .fs-panel { display: none; }
-.fullscreen.mode-cover .fs-body { grid-template-columns: minmax(0, 1fr); justify-content: stretch; align-items: stretch; gap: 0; }
+.fullscreen.mode-cover .fs-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); justify-content: stretch; align-items: stretch; gap: 0; }
 /* обложка занимает всё место, что осталось после названия и кнопок */
 .fullscreen.mode-cover .fs-main { height: 100%; min-height: 0; align-items: center; }
 .fullscreen.mode-cover .fs-main > :not(.fs-cover) { width: min(100%, 560px); }
@@ -478,14 +478,27 @@ body:not(.is-playing) .fs-cover { transform: scale(.95); }
 @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 10px) scale(.96); } }
 
 /* --- Адаптивность --- */
+/* левое меню сворачивается в иконки плавно: ширина, подписи и отступы анимируются */
+@property --side { syntax: '<length>'; inherits: true; initial-value: 228px; }
+:root { transition: --side .4s cubic-bezier(.4, 0, .2, 1); }
+.sidebar { overflow: hidden; transition: padding .4s cubic-bezier(.4, 0, .2, 1); }
+.sidebar .label { display: inline-block; max-width: 180px; overflow: hidden; vertical-align: middle; transition: max-width .4s cubic-bezier(.4, 0, .2, 1), opacity .25s ease; }
+.sidebar .item, .brand, .user { transition: padding .4s cubic-bezier(.4, 0, .2, 1), gap .4s cubic-bezier(.4, 0, .2, 1); }
+.nav-caption { max-height: 40px; overflow: hidden; white-space: nowrap; transition: max-height .4s cubic-bezier(.4, 0, .2, 1), padding .4s cubic-bezier(.4, 0, .2, 1), opacity .25s ease; }
 @media (max-width: 1080px) {
   :root { --side: 68px; }
   .sidebar { padding: 10px 8px; }
-  .label, .nav-caption { display: none !important; }
-  .item { justify-content: center; padding: 0; }
-  .brand { width: calc(var(--side) - 4px); padding-left: 0; justify-content: center; }
-  .user { justify-content: center; padding: 6px 0 2px; }
+  .sidebar .label, .brand .label { max-width: 0; opacity: 0; }
+  .nav-caption { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; }
+  .item { padding: 0 16px; gap: 0; }
+  .brand { gap: 0; padding-left: 20px; }
+  .user { gap: 0; padding: 6px 0 2px 9px; }
   .hero-cover { width: 180px; height: 180px; }
+}
+@media (max-width: 1280px) {
+  .player { gap: 12px; }
+  .right { gap: 4px; }
+  .volume input { width: 72px; }
 }
 @media (max-width: 900px) {
   :root { --player: 126px; --gap: 8px; }
@@ -878,3 +891,12 @@ body.fs-open .update-bar { top: 52px; }
   .fs-panel { overflow: hidden; }
   .fullscreen:not(.mode-cover) .fs-body { grid-template-rows: minmax(0, 1fr) auto; }
 }
+
+/* режим «Обложка» без движения мыши: кнопки сворачиваются, обложка плавно растёт на их место */
+.fullscreen.mode-cover .fs-actions, .fullscreen.mode-cover .fs-controls, .fullscreen.mode-cover .fs-volume, .fullscreen.mode-cover .fs-info .uc-status {
+  max-height: 90px;
+  transition: opacity .6s ease, max-height .9s cubic-bezier(.4, 0, .2, 1), margin .9s cubic-bezier(.4, 0, .2, 1), padding .9s cubic-bezier(.4, 0, .2, 1);
+}
+body.fs-idle .fullscreen.mode-cover .fs-controls, body.fs-idle .fullscreen.mode-cover .fs-volume { max-height: 0; margin-top: -16px; overflow: hidden; }
+body.fs-idle .fullscreen.mode-cover .fs-actions { max-height: 0; margin-top: -12px; overflow: hidden; }
+body.fs-idle .fullscreen.mode-cover .fs-info .uc-status { max-height: 0; margin-top: 0; padding-top: 0; padding-bottom: 0; }

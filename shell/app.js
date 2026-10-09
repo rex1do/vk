@@ -2270,7 +2270,7 @@ const lyrics = {
   lines: [],      // [{ time, text, node }]
   synced: false,
   active: -1,
-  loading: false,
+  run: 0,
 
   trackChanged() {
     this.key = null;
@@ -2296,15 +2296,19 @@ const lyrics = {
 
   async load() {
     const t = player.current;
-    if (!t || this.key === t.key || this.loading) return;
+    if (!t || this.key === t.key) return;
     this.key = t.key;
-    this.loading = true;
+    // зависший запрос не должен навсегда блокировать текст: у каждой загрузки свой номер,
+    // а у каждого источника — ограничение по времени
+    const run = this.run = (this.run || 0) + 1;
+    const limit = (p, ms) => Promise.race([p, new Promise((_, j) => setTimeout(() => j(new Error('timeout')), ms))]);
+    const stale = () => run !== this.run;
     lyricsBox.className = 'fs-lyrics empty';
     lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Загружаем текст…' }));
     let parsed = null;
     if (auth.loggedIn) {
       try {
-        parsed = this.parse(await vk('audio.getLyrics', { audio_id: t.key }), t.duration);
+        parsed = this.parse(await limit(vk('audio.getLyrics', { audio_id: t.key }), 10000), t.duration);
       } catch {
         parsed = null;
       }
@@ -2313,7 +2317,7 @@ const lyrics = {
     // у ВК текста нет — открытая база LRCLIB (часто с привязкой ко времени), затем Genius
     if (!parsed && player.current && player.current.key === t.key) {
       lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Ищем текст…' }));
-      const lrc = await bridge.lrclibLyrics({ artist: t.artist, title: t.title, duration: t.duration }).catch(() => null);
+      const lrc = await limit(bridge.lrclibLyrics({ artist: t.artist, title: t.title, duration: t.duration }), 30000).catch(() => null);
       if (lrc && lrc.synced) {
         const lines = lrc.synced.split('\n').map((line) => {
           const m = /^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/.exec(line.trim());
@@ -2326,13 +2330,13 @@ const lyrics = {
     }
     if (!parsed && player.current && player.current.key === t.key) {
       lyricsBox.replaceChildren(el('div', { class: 'lyric-empty', text: 'Ищем текст на Genius…' }));
-      const genius = await bridge.geniusLyrics({ artist: t.artist, title: t.title }).catch((err) => ({ error: String(err) }));
+      const genius = await limit(bridge.geniusLyrics({ artist: t.artist, title: t.title }), 45000).catch((err) => ({ error: String(err) }));
       if (genius && genius.lines && genius.lines.length) {
         parsed = { synced: false, lines: genius.lines.map((text) => ({ time: 0, text })), source: 'Genius' };
       }
       diag.add('lyrics', `Genius: ${parsed ? 'найден' : (genius && genius.url ? `страница ${genius.url}, ${genius.error || 'текста нет'}` : 'песня не найдена в поиске')}`);
     }
-    this.loading = false;
+    if (stale()) return;
     if (!player.current || player.current.key !== t.key) { this.key = null; return this.load(); }
     if (!parsed) {
       this.lines = [];
@@ -3447,11 +3451,20 @@ const idle = {
     }, 5000);
   },
 };
-['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach((ev) => document.addEventListener(ev, () => idle.wake(), { passive: true }));
-audio.addEventListener('pause', () => idle.wake());
+// будят только мышь над окном и клик/колесо. Клавиши (в т.ч. медиаклавиши), смена трека и пауза —
+// нет. Chromium сам шлёт «движение» без движения, когда под курсором меняется раскладка
+// (например, растёт обложка), — такие события отсекаем по координатам.
+let lastPointer = null;
+document.addEventListener('pointermove', (e) => {
+  const p = [e.screenX, e.screenY];
+  const moved = !lastPointer || Math.abs(p[0] - lastPointer[0]) + Math.abs(p[1] - lastPointer[1]) > 3;
+  lastPointer = p;
+  if (moved) idle.wake();
+}, { passive: true });
+document.addEventListener('pointerleave', () => { lastPointer = null; }, { passive: true });
+['pointerdown', 'wheel'].forEach((ev) => document.addEventListener(ev, () => idle.wake(), { passive: true }));
 audio.addEventListener('play', () => liquid.start());
 bridge.onWindowVisible((visible) => { if (visible) liquid.start(); });
-audio.addEventListener('play', () => idle.wake());
 
 // --- Полноэкранный: жесты на обложке ------------------------------------------------------
 // колесо — громкость, тянуть влево/вправо — перемотка, вниз — свернуть, двойной клик — в «Мои аудио»

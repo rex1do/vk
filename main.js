@@ -12,6 +12,7 @@ const {
   app, BaseWindow, BrowserWindow, Menu, Tray, WebContentsView, dialog, ipcMain, nativeImage, nativeTheme, net, screen, session, shell,
 } = require('electron');
 const crypto = require('crypto');
+const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
@@ -394,7 +395,7 @@ const firstArtist = (artist) => String(artist || '').split(/,|&| feat\.?| ft\.?|
 
 async function fetchText(url, accept = 'text/html') {
   try {
-    const r = await net.fetch(url, { headers: { 'User-Agent': app.userAgentFallback, Accept: accept, 'Accept-Language': 'ru,en;q=0.8' } });
+    const r = await net.fetch(url, { headers: { 'User-Agent': app.userAgentFallback, Accept: accept, 'Accept-Language': 'ru,en;q=0.8' }, signal: AbortSignal.timeout(12000) });
     return r.ok ? await r.text() : null;
   } catch {
     return null;
@@ -522,6 +523,30 @@ async function lrclibLyrics({ artist, title, duration }) {
 
 // --- Окно ----------------------------------------------------------------------------------
 
+// Скруглённые углы окна. Windows 11 скругляет окна сама; на Windows 10 окно без рамки
+// прямоугольное — задаём ему форму со скруглёнными углами (развёрнутое окно остаётся прямым).
+const CORNER = 10;
+const needsShape = process.env.VKP_SHAPE === '1'
+  || (process.platform === 'win32' && Number(os.release().split('.')[2] || 0) < 22000);
+let lastShape = '';
+function roundCorners() {
+  if (!needsShape || !win || win.isDestroyed() || typeof win.setShape !== 'function') return;
+  const { width, height } = win.getBounds();
+  const square = win.isMaximized() || win.isFullScreen();
+  const sig = `${width}x${height}:${square}`;
+  if (sig === lastShape) return;
+  lastShape = sig;
+  if (square) return win.setShape([{ x: 0, y: 0, width, height }]);
+  const rects = [{ x: 0, y: CORNER, width, height: height - CORNER * 2 }];
+  for (let y = 0; y < CORNER; y++) {
+    const dy = CORNER - y - 0.5;
+    const inset = Math.round(CORNER - Math.sqrt(CORNER * CORNER - dy * dy));
+    rects.push({ x: inset, y, width: width - inset * 2, height: 1 });
+    rects.push({ x: inset, y: height - 1 - y, width: width - inset * 2, height: 1 });
+  }
+  win.setShape(rects);
+}
+
 function createWindow() {
   settings = loadSettings();
   const bounds = visibleBounds(settings.bounds) || { width: 1280, height: 820 };
@@ -580,9 +605,10 @@ function createWindow() {
     shellView.setBounds({ x: 0, y: 0, width, height });
   };
   layout();
-  win.on('resize', () => { layout(); saveSettings(); });
+  roundCorners();
+  win.on('resize', () => { layout(); roundCorners(); saveSettings(); });
   win.on('move', saveSettings);
-  const sendWindowState = () => sendToShell('window-state', { maximized: win.isMaximized(), fullscreen: win.isFullScreen() });
+  const sendWindowState = () => { roundCorners(); sendToShell('window-state', { maximized: win.isMaximized(), fullscreen: win.isFullScreen() }); };
   win.on('maximize', sendWindowState);
   win.on('unmaximize', sendWindowState);
   win.on('enter-full-screen', sendWindowState);
