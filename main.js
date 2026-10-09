@@ -744,6 +744,8 @@ function checkForUpdates() {
   autoUpdater.on('update-downloaded', (info) => sendToShell('update-state', { state: 'ready', version: info.version }));
   autoUpdater.on('error', (err) => sendToShell('update-state', { state: 'error', error: String(err && err.message || err).slice(0, 200) }));
   autoUpdater.checkForUpdates().catch(() => {});
+  // пока программа открыта — проверяем каждые 30 минут
+  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 30 * 60 * 1000);
 }
 ipcMain.on('update-install', () => {
   try {

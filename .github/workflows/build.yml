@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# по одной сборке за раз: две параллельные не должны публиковать один и тот же релиз
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   windows:
     runs-on: windows-latest

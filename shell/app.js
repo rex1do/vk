@@ -2618,6 +2618,7 @@ const library = {
           ['audio.delete', { owner_id: me, audio_id: t.id }],
           ['audio.delete', { owner_id: t.owner_id, audio_id: t.id }],
           ['audio.removeFromPlaylist', { owner_id: me, playlist_id: -1, audio_ids: t.fullId }],
+          ['audio.removeFromPlaylist', { owner_id: me, playlist_id: -1, audio_ids: t.key }],
         ].filter(Boolean);
         let done = false, lastErr = null;
         for (const [method, params] of attempts) {
@@ -2633,6 +2634,11 @@ const library = {
         }
         if (!done) throw lastErr || new Error('ВК не дал удалить');
         this.keys.delete(t.key);
+        this.ids.delete(t.key);
+        // убираем строку из открытых списков и сбрасываем запомненные экраны и список треков
+        $$(`#view .row[data-key="${t.key}"]`).forEach((row) => { if (/^my$/.test((router.stack[router.index] || {}).name)) row.remove(); });
+        router.dropCache();
+        myAllCache = null;
         delete this.copies[t.key];
         try { localStorage.setItem('addedCopies', JSON.stringify(this.copies)); } catch { /* не страшно */ }
         toast('Убрано из Моих аудио');
@@ -2650,7 +2656,8 @@ const library = {
       }
       apiCache.clear(); // «Моя музыка» должна обновиться
     } catch (err) {
-      toast(`Не получилось: ${err.message}`);
+      diag.add('library', `не получилось: ${err.message}`);
+      toast(`ВК не дал ${this.has(t) ? 'удалить' : 'добавить'}: ${err.message}`, { duration: 6000 });
     }
     renderAddState();
   },
@@ -3534,14 +3541,27 @@ bridge.onWindowState(({ maximized, fullscreen }) => {
 });
 
 // --- Обновление программы ------------------------------------------------------------------
+// плашка висит, пока не обновитесь или не закроете её
+function updateBanner(text, button, action) {
+  let bar = $('#update-bar');
+  if (!bar) {
+    bar = el('div', { class: 'update-bar', id: 'update-bar', role: 'status' });
+    document.body.append(bar);
+  }
+  bar.replaceChildren(
+    el('span', { class: 'update-dot' }),
+    el('span', { class: 'update-text', text }),
+    button ? el('button', { class: 'update-btn', text: button, onclick: action }) : null,
+    el('button', { class: 'update-close', title: 'Скрыть', html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>', onclick: () => bar.remove() }));
+}
 bridge.onUpdateState((st) => {
   diag.add('update', JSON.stringify(st));
   if (st.state === 'ready') {
-    toast(`Версия ${st.version} готова — нажмите, чтобы перезапустить и обновить`, { onClick: () => bridge.installUpdate(), duration: 20000 });
+    updateBanner(`Вышла версия ${st.version}. Она уже скачана.`, 'Перезапустить', () => bridge.installUpdate());
   } else if (st.state === 'available-portable') {
-    toast(`Вышла версия ${st.version} — нажмите, чтобы скачать`, { onClick: () => bridge.openUpdatePage(), duration: 15000 });
+    updateBanner(`Вышла версия ${st.version}.`, 'Скачать', () => bridge.openUpdatePage());
   } else if (st.state === 'downloading' && st.version) {
-    toast(`Скачивается обновление ${st.version}…`);
+    updateBanner(`Вышла версия ${st.version}, скачиваем…`);
   }
 });
 
