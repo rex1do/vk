@@ -2915,17 +2915,25 @@ const eq = {
         const mid = make('peaking', 1000, 0.8);
         const high = make('highshelf', 4500);
         const hp = make('highpass', 10, 0.7);
+        const lp = make('lowpass', 20000, 0.7);
         const mix = ctx.createGain();
         const echoIn = ctx.createGain(), delay = ctx.createDelay(3), fb = ctx.createGain(), wet = ctx.createGain();
         const rvIn = ctx.createGain();
         [echoIn, fb, wet, rvIn].forEach((g) => { g.gain.value = 0; });
-        src.connect(trim).connect(low).connect(mid).connect(high).connect(hp).connect(mix).connect(master);
-        hp.connect(echoIn).connect(delay);
+        src.connect(trim).connect(low).connect(mid).connect(high).connect(hp).connect(lp).connect(mix).connect(master);
+        lp.connect(echoIn).connect(delay);
         delay.connect(fb).connect(delay);
         delay.connect(wet).connect(master);
-        hp.connect(rvIn).connect(this.reverb);
-        return { trim, low, mid, high, hp, mix, echoIn, delay, fb, wet, rvIn };
+        lp.connect(rvIn).connect(this.reverb);
+        return { trim, low, mid, high, hp, lp, mix, echoIn, delay, fb, wet, rvIn };
       });
+      // шум для «райзера» — нарастающего шипения перед дропом
+      this.noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+      this.noise.getChannelData(0).forEach((_, i, d) => { d[i] = Math.random() * 2 - 1; });
+      // «склейка» для DJ-сета: лёгкое общее сжатие, как при сведении микса — треки звучат одним целым
+      this.glue = ctx.createDynamicsCompressor();
+      this.glueGain = ctx.createGain();
+      this.setGlue(false);
       // мягкий лимитер на выходе: два трека вместе не перегружают звук
       this.limiter = ctx.createDynamicsCompressor();
       this.limiter.threshold.value = -2;
@@ -2933,12 +2941,23 @@ const eq = {
       this.limiter.ratio.value = 20;
       this.limiter.attack.value = 0.002;
       this.limiter.release.value = 0.2;
-      [...this.filters, this.limiter, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
+      [...this.filters, this.glue, this.glueGain, this.limiter, this.analyser, ctx.destination].reduce((a, b) => { a.connect(b); return b; });
       this.ctx = ctx;
       this.apply();
     } catch (err) {
       console.warn('Эквалайзер недоступен', err);
     }
+  },
+
+  setGlue(on) {
+    if (!this.glue) return;
+    const g = this.glue;
+    g.threshold.value = on ? -18 : 0;
+    g.ratio.value = on ? 2 : 1;
+    g.knee.value = 10;
+    g.attack.value = 0.015;
+    g.release.value = 0.35;
+    this.glueGain.gain.value = on ? 1.26 : 1; // +2 дБ — возвращаем громкость после сжатия
   },
 
   apply() {
