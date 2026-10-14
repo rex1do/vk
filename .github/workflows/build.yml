@@ -3,6 +3,8 @@ name: Build Windows
 on:
   push:
     branches: [main]
+    # правки только описания и скриншотов не выпускают новую сборку
+    paths-ignore: ['README.md', 'docs/**']
   workflow_dispatch:
 
 permissions:
