@@ -1,0 +1,17 @@
+/* VK Player для Android (магнитолы, планшеты): окно всегда на весь экран, графика попроще */
+
+/* «развернуть» не нужно; «закрыть» сворачивает приложение, музыка играет дальше */
+.android [data-window="maximize"] { display: none; }
+
+/* размытие под стеклом — самое тяжёлое для графики магнитол: заменяем плотным тёмным стеклом */
+.android .glass, .android .heavy, .android .suggest, .android .login-card { backdrop-filter: none !important; background-color: rgba(22, 22, 32, .92); }
+.android .fullscreen { backdrop-filter: none !important; }
+.android .login-modal, .android .mix-settings-backdrop { backdrop-filter: none !important; background: rgba(4, 4, 8, .82); }
+
+/* живой фон полноэкранного плеера: размытие поменьше */
+.android .fs-liquid { filter: blur(28px) saturate(1.2); }
+
+/* пальцем по экрану: кнопки и ползунки покрупнее */
+.android input[type="range"] { height: 26px; }
+.android input[type="range"]::-webkit-slider-thumb { opacity: 1; width: 14px; height: 14px; margin-top: -5px; }
+.android .row .more, .android .row .actions { opacity: 1; }
